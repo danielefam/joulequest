@@ -1,0 +1,10 @@
+To get started, follow the instructions at g.co/coral
+
+#Documentation
+https://coral.ai/docs/
+
+#Datasheet
+https://coral.ai/docs/dev-board/datasheet/#features
+
+#Mendel Linux 
+https://coral.googlesource.com/docs/+/refs/heads/master/GettingStarted.md
