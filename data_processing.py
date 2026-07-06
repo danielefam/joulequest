@@ -8,6 +8,8 @@ from skimage.filters import threshold_otsu
 import argparse
 import numpy as np
 
+sampling_interval = 0.1
+
 def load_data(csv_path):
     """
     Load data from a CSV file.
@@ -67,7 +69,7 @@ def compute_means_variances(df, threshold):
     # average_power_idle = below_threshold.mean()
     # variance_idle = below_threshold.var()
 
-    sampling_interval = 0.1
+    # sampling_interval = 0.1
 
     # These flags indicate whether the first and last samples are active, 
     # which affects how we identify active regions and their corresponding idle periods.
@@ -226,7 +228,8 @@ def show_data(df,filepath=None,save=False):
     # Align 'Sample' values with the smoothed data index
     sample_aligned = df['Sample'].iloc[smoothed.index]
 
-    time_sec = df['Sample'] * 0.1 # Assuming each sample corresponds to 0.1 seconds
+    # time_sec = df['Sample'] * 0.1 # Assuming each sample corresponds to 0.1 seconds
+    time_sec = df['Sample'] * sampling_interval # Assuming each sample corresponds to 0.1 seconds
     #time_sec = df['Sample'] / 1000 # Assuming 'Sample' is in milliseconds, convert to seconds
     time_sec_smoothed = time_sec.iloc[smoothed.index]
 
