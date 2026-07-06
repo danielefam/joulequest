@@ -277,7 +277,7 @@ def main():
     parser.add_argument(
          '-k', '--kernel_size', required=False, help='kernel size for median filtering',default=11)
     parser.add_argument(
-         '-fs', '--freq', required=False, help='Sampling frequency (Hz)',default=5)
+         '-fs', '--freq', required=False, help='Sampling frequency (Hz)',default=10)
     parser.add_argument(
          '-cutoff', '--cutoff',required=False, help=' Cutoff frequency (Hz)',default=0.1)
     parser.add_argument(
