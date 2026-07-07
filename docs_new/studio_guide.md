@@ -101,6 +101,7 @@ Deliverable:
 - Choose initial platform:
   - Jetson (recommended if immediately available)
   - Coral (if runtime + compiler are already ready)
+  - Raspberry Pi 5 (recommended for CPU-only baseline if you need immediate Pi-side data)
 - Verify environment dependencies
 - Run one quick test with a single model
 
@@ -132,6 +133,17 @@ Deliverable:
 
 ## 3) Practical Procedure for Today (Checklist)
 
+### 3.0 Raspberry Pi 5 Quick Notes
+
+If your target is Raspberry Pi 5, apply these rules before acquisition:
+
+- Use a stable USB-C supply capable of **5V up to 5A**.
+- Use a short, good-quality USB-C cable.
+- Do not power the board from a PC USB port during measurement sessions.
+- In INA226EVM software, set **Max Expected Current = 5A**.
+
+If you observe random disconnects, LED color changes, or HDMI black screen, stop the campaign and validate power setup first.
+
 ### 3.1 Pre-Flight Checklist (15 min)
 - Stable power supply with sufficient current budget
 - INA226EVM recognized by host PC
@@ -151,6 +163,11 @@ python run_manager.py --backend cpu --model Models/CPU/Linear/Linear_128_128.pt 
 #### Jetson/CUDA
 ```bash
 python run_manager.py --backend cuda --model Models/CPU/Linear/Linear_128_128.pt --nb_run 5 --sleep_time 10
+```
+
+#### Raspberry Pi 5/CPU
+```bash
+python run_manager.py --backend cpu --model Models/CPU/Linear/Linear_128_128.pt --nb_run 5 --sleep_time 10
 ```
 
 #### Coral/TPU
@@ -201,6 +218,11 @@ Estimated duration for 4 models:
 - Acquisition: 90-130 min (hardware-dependent)
 - Quick analysis: 20-30 min
 Total: about 3-3.5 hours
+
+Pi 5 recommendation:
+- Start with `Linear_64_64` and `Linear_512_512` first.
+- If both are stable, continue to larger models.
+- Store files in a dedicated folder such as `Data/Raspberry_pi5_power_record/Linear`.
 
 ## 5) Measurement Quality Criteria
 

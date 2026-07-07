@@ -9,13 +9,14 @@
 1. [Project Overview](#1-project-overview)
 2. [Motivation: Power vs Accuracy Tradeoff in NAS](#2-motivation-power-vs-accuracy-tradeoff-in-nas)
 3. [Measurement Hardware](#3-measurement-hardware)
-4. [Software Architecture](#4-software-architecture)
-5. [End-to-End Workflow](#5-end-to-end-workflow)
-6. [CSV Data Format](#6-csv-data-format)
-7. [Signal Processing Pipeline](#7-signal-processing-pipeline)
-8. [Quick Start Guide](#8-quick-start-guide)
-9. [Directory Structure](#9-directory-structure)
-10. [Dependencies and Environments](#10-dependencies-and-environments)
+4. [Raspberry Pi 5 Notes](#4-raspberry-pi-5-notes)
+5. [Software Architecture](#5-software-architecture)
+6. [End-to-End Workflow](#6-end-to-end-workflow)
+7. [CSV Data Format](#7-csv-data-format)
+8. [Signal Processing Pipeline](#8-signal-processing-pipeline)
+9. [Quick Start Guide](#9-quick-start-guide)
+10. [Directory Structure](#10-directory-structure)
+11. [Dependencies and Environments](#11-dependencies-and-environments)
 
 ---
 
@@ -118,7 +119,53 @@ The **Texas Instruments INA226EVM** is an evaluation board built around INA226, 
 
 ---
 
-## 4. Software Architecture
+## 4. Raspberry Pi 5 Notes
+
+Raspberry Pi 5 is a valid BANERA measurement target for PyTorch `Linear` models. It behaves similarly to the Jetson CPU path from the software point of view (`--backend cpu`), but power delivery constraints are stricter.
+
+### 4.1 Recommended Power Setup
+
+- Use a stable USB-C PSU capable of **5V up to 5A**.
+- Use a short and good-quality USB-C cable (poor cables are a common instability source).
+- Avoid powering the board from a PC USB port during measurements.
+- If the board disconnects, LED color changes unexpectedly, or HDMI output disappears, first suspect power instability.
+
+### 4.2 INA226EVM Configuration for Pi 5
+
+- In INA226EVM software, set **Max Expected Current = 5A**.
+- Keep the same sampling approach used in this project (10 Hz, long inference bursts) for consistency with existing datasets.
+
+### 4.3 Where to Store Pi 5 Measurements
+
+Use a dedicated folder to keep data separated from Coral/Jetson:
+
+```text
+Data/
+`- Raspberry_pi5_power_record/
+        `- Linear/
+```
+
+Filename convention stays unchanged:
+
+- `Linear_{in_features}_{out_features}.csv`
+- Example: `Linear_512_512.csv`
+
+### 4.4 Pi 5 Measurement Command
+
+```bash
+python run_manager.py --backend cpu --model Models/CPU/Linear/Linear_128_256.pt --nb_run 5 --sleep_time 10
+```
+
+### 4.5 Quick Stability Checklist (Pi 5)
+
+1. Boot with minimal peripherals connected.
+2. Verify HDMI and SSH are both stable at idle before running bursts.
+3. Run one small model first (`Linear_64_64`) as a smoke test.
+4. Only then launch the full campaign (`64, 512, 1024, 2048, ...`).
+
+---
+
+## 5. Software Architecture
 
 ### High-Level Class Diagram
 
@@ -153,7 +200,7 @@ data_report.py                 # Excel reporting and aggregation
 
 ---
 
-## 5. End-to-End Workflow
+## 6. End-to-End Workflow
 
 ### Phase 1 - Model Preparation
 
@@ -210,7 +257,7 @@ Excel export:
 
 ---
 
-## 6. CSV Data Format
+## 7. CSV Data Format
 
 ### Row Example
 
@@ -242,7 +289,7 @@ Data/
 
 ---
 
-## 7. Signal Processing Pipeline
+## 8. Signal Processing Pipeline
 
 The main entry point is `data_processing.get_average_power()`.
 
@@ -338,7 +385,7 @@ results = {
 
 ---
 
-## 8. Quick Start Guide
+## 9. Quick Start Guide
 
 ### 8.1 Environment Setup
 
@@ -379,6 +426,9 @@ python run_manager.py --backend cpu --model Models/CPU/Linear/Linear_128_256.pt 
 
 # Jetson CUDA
 python run_manager.py --backend cuda --model Models/CPU/Linear/Linear_128_256.pt --nb_run 5 --sleep_time 10
+
+# Raspberry Pi 5 (CPU)
+python run_manager.py --backend cpu --model Models/CPU/Linear/Linear_128_256.pt --nb_run 5 --sleep_time 10
 ```
 
 ### 8.4 Analyze Single CSV
@@ -395,7 +445,7 @@ python data_report.py --data_folder Data/Jetson_nano_power_record/Linear --plot_
 
 ---
 
-## 9. Directory Structure
+## 10. Directory Structure
 
 ```text
 energyBANERA-main/
@@ -415,12 +465,12 @@ energyBANERA-main/
 |- Tuto/
 `- docs_new/
    |- README.md
-   `- GUIDA_STUDIO_E_MISURE_OGGI.md
+        `- studio_guide.md
 ```
 
 ---
 
-## 10. Dependencies and Environments
+## 11. Dependencies and Environments
 
 ### TensorFlow / Edge TPU Environment
 

@@ -7,7 +7,7 @@ import seaborn as sns
 #%matplotlib inline
 
 # Load CSV File
-csv_path = '/home/frederic/Documents/BANERA/Code/Linear_2048_2048.csv'  # Change this to your CSV file path
+csv_path = '/home/daniele/Documents/BANERA/Code/Linear_2048_2048.csv'  # Change this to your CSV file path
 df = pd.read_csv(csv_path)
 
 # Smooth the 'EVM1 POWER Results (W)' using a rolling mean
