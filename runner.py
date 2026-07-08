@@ -93,11 +93,12 @@ if _torch_available:
             print(f" Torch Model loaded: {self.model_path}")
 
         def run_inference(self,count=5, repeat=10):
-            for _ in range(repeat):
-                for _ in range(count):
-                    output_data = self.model(self.input_data)
-                # torch.cuda.synchronize()
-                time.sleep(1)
+            with torch.no_grad():
+                for _ in range(repeat):
+                    for _ in range(count):
+                        output_data = self.model(self.input_data)
+                    # torch.cuda.synchronize()
+                    time.sleep(1)
 
             print("Input:")
             print(self.input_data)
