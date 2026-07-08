@@ -111,7 +111,7 @@ if _torch_available:
             filename = os.path.splitext(os.path.basename(self.model_path))[0]
             
             parts = filename.split("_")
-            layer_type = parts[0]
+            layer_type = parts[0].lower()
             params = [int(p) for p in parts[1:]]  # Convert all but the first part to integers
     
             if layer_type == "linear":
