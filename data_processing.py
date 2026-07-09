@@ -1,7 +1,6 @@
 # Import Required Libraries
 import pandas as pd
 import matplotlib.pyplot as plt
-import seaborn as sns
 from scipy.signal import medfilt
 from scipy.signal import butter, filtfilt
 from skimage.filters import threshold_otsu

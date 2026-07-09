@@ -8,9 +8,9 @@ import argparse
 detailed_rows = []
 net_power_dict = {}  # Nested dict for matrix
 
-
-data_folder = "/home/frederic/Documents/BANERA/Code/Data/Jetson_nano_power_record/Conv_3_0"
-plot_folder = "/home/frederic/Documents/BANERA/Code/Plot/Jetson_nano_plots/Conv_3_0"
+layer_type = "linear" #linear or conv
+data_folder = "/home/daniele/Desktop/tirocinio/energyBANERA-main/Data/Jetson_nano_power_record/Linear"
+plot_folder = "/home/daniele/Desktop/tirocinio/energyBANERA-main/Plot/Jetson_nano_power_record/Linear"
 def main():
     parser = argparse.ArgumentParser(
          formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -82,7 +82,7 @@ def main():
     #     matrix_df.to_excel(writer, sheet_name="Net Power Matrix")
     #     detailed_df.to_excel(writer, sheet_name="Detailed Stats", index=False)
 
-    with pd.ExcelWriter("linear_power_report.xlsx", engine="xlsxwriter") as writer:
+    with pd.ExcelWriter(data_folder + f"/../statistics/{layer_type}_power_report.xlsx", engine="xlsxwriter") as writer:
         # Write sheets
         matrix_df.to_excel(writer, sheet_name="Average Power Matrix")
         detailed_df.drop(columns=["Plot"]).to_excel(writer, sheet_name="Detailed Stats", index=False)
@@ -96,7 +96,8 @@ def main():
             #hyperlink = f'file:///{abs_path.replace(os.sep, "/")}'  # Make sure path is URI-friendly
             #hyperlink= os.path.join("Plot", plot_filename)
             #hyperlink = f"file://{detailed_df['Plot']}"
-            worksheet.write_url(row_idx, num_cols, file_path, string="View Plot") 
+            plot_url = f"external:{abs_path}"
+            worksheet.write_url(row_idx, num_cols, plot_url, string="View Plot") 
         
 
         # Add hyperlinks from matrix to detailed stats
