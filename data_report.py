@@ -6,9 +6,9 @@ import argparse
 # Init your data holders
 detailed_rows = []
 
-layer_type = "linear_nograd"
-data_folder = "/home/daniele/Desktop/tirocinio/energyBANERA-main/Data/new_measures/jetson_nano/Linear_nograd"
-plot_folder = "/home/daniele/Desktop/tirocinio/energyBANERA-main/Plot/new_measures/jetson_nano/Linear_nograd"
+layer_type = "conv_3_0"
+data_folder = "/home/daniele/Desktop/tirocinio/energyBANERA-main/Data/new_measures/jetson_nano/Conv_3_0"
+plot_folder = "/home/daniele/Desktop/tirocinio/energyBANERA-main/Plot/new_measures/jetson_nano/Conv_3_0"
 
 
 def build_layer_name(filename):
@@ -53,7 +53,7 @@ def main():
         results = dp.get_average_power(
                                                                 df,
                                                                 kernel_size=11,  # Median filter kernel size
-                                                                fs=5,            # Sampling frequency
+                                                                fs=10,            # Sampling frequency
                                                                 cutoff=0.1,      # Low-pass filter cutoff frequency
                                                                 window_size=30   # Rolling average window size
                                                             )

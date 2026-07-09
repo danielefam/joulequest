@@ -112,9 +112,9 @@ def compute_means_variances(df, threshold):
 
     for i,(start, end) in enumerate(zip(start_indices, end_indices)):
         
-    ##################################
-    # ACTIVE COMPUTATION
-    ##################################
+        ##################################
+        # ACTIVE COMPUTATION
+        ##################################
 
         duration = (end - start) * sampling_interval
         # if duration > max_duration:
@@ -126,9 +126,9 @@ def compute_means_variances(df, threshold):
         #energy_active = average_power_active * duration
 
     
-    ##################################
-    # IDLE COMPUTATION
-    ##################################
+        ##################################
+        # IDLE COMPUTATION
+        ##################################
         # Get idle region before
         if i == 0 and is_active_first:
             idle_before = None
