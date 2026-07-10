@@ -7,35 +7,38 @@ import gc
 
 
 class RunManager:
-    def __init__(self, runner_cls, model_path, nb_run, sleep_time, backend):
+    def __init__(self, runner_cls, model_path, number_of_cycles, sleep_time, backend, inferences_per_cycle):
         #self.runner = runner_cls(model_path)
         self.runner = runner_cls
-        self.nb_run = nb_run
+        self.number_of_cycles = number_of_cycles
         self.sleep_time = sleep_time
         self.model_path = model_path
         self.backend = backend
+        self.inferences_per_cycle = inferences_per_cycle
 
     def execute(self):
         #input_data = np.random.rand(1, 2).astype(np.float32)
         runner = self.runner(self.model_path,self.backend)
-        runner.generate_input()
 
-        for i in range(self.nb_run):
-            print(f"Run {i+1}/{self.nb_run}")
+        for i in range(self.number_of_cycles):
+            print(f"Run {i+1}/{self.number_of_cycles}")
+
+            if hasattr(runner, "randomize_parameters"):
+                runner.randomize_parameters()
+
+            if hasattr(runner, "generate_input"):
+                runner.generate_input()
             
-            runner.run_inference(count=100000, repeat=1)
-            # del runner
-            # gc.collect()
-            if i < self.nb_run - 1:  # Don't sleep after the last run
-                time.sleep(self.sleep_time)
+            runner.run_inference(inferences_per_cycle=self.inferences_per_cycle)
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--backend", choices=["tpu", "cpu","cuda"], required=True)
     parser.add_argument("--model", required=True)
-    parser.add_argument("--nb_run", type=int, default=5)
+    parser.add_argument("--number_of_cycles", type=int, default=5)
     parser.add_argument("--sleep_time", type=int, default=10)
+    parser.add_argument("--inferences_per_cycle", type=int, default=110)
     args = parser.parse_args()
 
     if args.backend == "tpu":
@@ -46,7 +49,7 @@ def main():
         runner_cls = TorchRunner
     else:
         raise ValueError("Selected backend is not available or supported.")
-    manager = RunManager(runner_cls, args.model, args.nb_run, args.sleep_time,args.backend)
+    manager = RunManager(runner_cls, args.model, args.number_of_cycles, args.sleep_time,args.backend, args.inferences_per_cycle)
     manager.execute()
 
 

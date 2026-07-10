@@ -38,7 +38,7 @@ if _tf_available:
             self.input_details = self.interpreter.get_input_details()
             self.output_details = self.interpreter.get_output_details()
 
-        def run_inference(self,count=5, repeat=10):
+        def run_inference(self,inferences_per_cycle=110):
 
             input_shape = self.input_details[0]['shape']
             input_data = np.random.rand(1, input_shape[1]).astype(np.float32)
@@ -52,10 +52,9 @@ if _tf_available:
             self.interpreter.set_tensor(self.input_details[0]['index'], input_uint8)
             #interpreter.set_tensor(input_details[0]['index'], input_data)        
 
-            for _ in range(repeat):
-                for _ in range(count):
-                    self.interpreter.invoke()
-                time.sleep(1)
+            for _ in range(inferences_per_cycle):
+                self.interpreter.invoke()
+            time.sleep(1)
 
             output_data = self.interpreter.get_tensor(self.output_details[0]['index'])
 
@@ -92,13 +91,18 @@ if _torch_available:
             self.model.eval()
             print(f" Torch Model loaded: {self.model_path}")
 
-        def run_inference(self,count=5, repeat=10):
+        def randomize_parameters(self):
+            self.model.apply(
+                lambda m: m.reset_parameters() if hasattr(m, "reset_parameters") else None
+            )
+            self.model.eval()
+
+        def run_inference(self, inferences_per_cycle=110):
             with torch.no_grad():
-                for _ in range(repeat):
-                    for _ in range(count):
-                        output_data = self.model(self.input_data)
-                    # torch.cuda.synchronize()
-                    time.sleep(1)
+                for _ in range(inferences_per_cycle):
+                    output_data = self.model(self.input_data)
+                # torch.cuda.synchronize()
+                time.sleep(1)
 
             print("Input:")
             print(self.input_data)
