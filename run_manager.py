@@ -30,6 +30,7 @@ class RunManager:
                 runner.generate_input()
             
             runner.run_inference(inferences_per_cycle=self.inferences_per_cycle)
+            time.sleep(self.sleep_time)
 
 
 def main():
