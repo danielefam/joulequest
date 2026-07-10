@@ -4,6 +4,7 @@ import argparse
 import numpy as np
 import importlib.util
 import gc
+import torch
 
 
 class RunManager:
@@ -17,21 +18,37 @@ class RunManager:
         self.inferences_per_cycle = inferences_per_cycle
 
     def execute(self):
+        def execute_cycle(self):
+            if hasattr(runner, "randomize_parameters"):
+                runner.randomize_parameters()
+            if hasattr(runner, "generate_input"):
+                runner.generate_input()
+            runner.run_inference(inferences_per_cycle=self.inferences_per_cycle)
+        
         #input_data = np.random.rand(1, 2).astype(np.float32)
         runner = self.runner(self.model_path,self.backend)
 
+        # discard the first
+        execute_cycle(self)
+
+        # cooling down
+        time.sleep(self.sleep_time)
+        
+        # cycle inference time estimation
+        if hasattr(runner, "randomize_parameters"):
+            runner.randomize_parameters()
+        if hasattr(runner, "generate_input"):
+            runner.generate_input()
+        runner.measure_cycle_inference_time(inferences_per_cycle=self.inferences_per_cycle)
+        print(f"cycle inference time= "
+                f"{runner.measure_cycle_inference_time(self.inferences_per_cycle)}ms")
+
         for i in range(self.number_of_cycles):
             print(f"Run {i+1}/{self.number_of_cycles}")
-
-            if hasattr(runner, "randomize_parameters"):
-                runner.randomize_parameters()
-
-            if hasattr(runner, "generate_input"):
-                runner.generate_input()
-            
-            runner.run_inference(inferences_per_cycle=self.inferences_per_cycle)
+            execute_cycle(self)
             time.sleep(self.sleep_time)
 
+    
 
 def main():
     parser = argparse.ArgumentParser()
