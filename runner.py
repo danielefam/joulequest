@@ -101,13 +101,20 @@ if _torch_available:
             with torch.no_grad():
                 for _ in range(inferences_per_cycle):
                     output_data = self.model(self.input_data)
-                # torch.cuda.synchronize()
-                time.sleep(1)
-
-            print("Input:")
-            print(self.input_data)
-            print("\nOutput:")
-            print(output_data)
+                if self.device.type == "cuda" and torch.cuda.is_available():
+                    torch.cuda.synchronize(self.device)
+        
+        def measure_cycle_inference_time(self, inferences_per_cycle=110):
+            """returns the inferences time for a cycle in ms"""            
+            if self.device.type == "cuda" and torch.cuda.is_available():
+                torch.cuda.synchronize(self.device)
+            gen_start = time.perf_counter()            
+            self.run_inference(inferences_per_cycle)
+            if self.device.type == "cuda" and torch.cuda.is_available():
+                torch.cuda.synchronize(self.device)
+            gen_end = time.perf_counter()
+                
+            return (gen_end - gen_start) * 1000
         
         def _extract_layer_info(self):
 
