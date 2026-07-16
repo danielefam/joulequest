@@ -1,21 +1,22 @@
-# tflite_tpu_runner.py
+# runner.py
 import platform
 import numpy as np
 
 from base_runner import InferenceRunner
-import time
 import os
-from pprint import pprint 
 
 
-# Detect pytorch env or tensorflow env
-import importlib.util
-_tf_available = importlib.util.find_spec("tflite_runtime") is not None
-_torch_available = importlib.util.find_spec("torch") is not None
+import importlib
+from importlib.util import find_spec
+
+
+# Define only the runners supported by the active target environment.
+_tf_available = find_spec("tflite_runtime") is not None
+_torch_available = find_spec("torch") is not None
 
 
 if _tf_available:
-    import tflite_runtime.interpreter as tflite
+    tflite = importlib.import_module("tflite_runtime.interpreter")
     EDGETPU_SHARED_LIB = {
         'Linux': 'libedgetpu.so.1',
         'Darwin': 'libedgetpu.1.dylib',
@@ -23,9 +24,15 @@ if _tf_available:
     }[platform.system()]
 
     class TFLiteTPURunner(InferenceRunner):
-        def __init__(self, model_path,device):
-            super().__init__(model_path)
-            self._load_model() 
+        """Inference runner for a compiled Edge TPU TFLite model.
+
+        The TPU path is retained for compatibility, although current campaign
+        development and validation prioritize the PyTorch CPU/CUDA path.
+        """
+
+        def __init__(self, model_path, device="tpu"):
+            super().__init__(model_path, device=device)
+            self._load_model()
 
         def _load_model(self):
             self.interpreter = tflite.Interpreter(
@@ -38,58 +45,57 @@ if _tf_available:
             self.input_details = self.interpreter.get_input_details()
             self.output_details = self.interpreter.get_output_details()
 
-        def run_inference(self,inferences_per_cycle=110):
+        def generate_input(self):
+            """Generate and store the input for the next burst."""
+            details = self.input_details[0]
+            input_data = np.random.random_sample(tuple(details['shape'])).astype(np.float32)
+            scale, zero_point = details['quantization']
 
-            input_shape = self.input_details[0]['shape']
-            input_data = np.random.rand(1, input_shape[1]).astype(np.float32)
+            if scale > 0 and np.issubdtype(details['dtype'], np.integer):
+                limits = np.iinfo(details['dtype'])
+                input_data = np.clip(
+                    np.rint(input_data / scale + zero_point),
+                    limits.min,
+                    limits.max,
+                ).astype(details['dtype'])
+            else:
+                input_data = input_data.astype(details['dtype'])
 
-            # Quantization
-            scale, zero_point = self.input_details[0]['quantization']
-            input_uint8 = (input_data / scale + zero_point).astype(np.uint8)
-            
+            self.interpreter.set_tensor(details['index'], input_data)
 
-            # Set input tensor
-            self.interpreter.set_tensor(self.input_details[0]['index'], input_uint8)
-            #interpreter.set_tensor(input_details[0]['index'], input_data)        
-
+        def run_inference(self, inferences_per_cycle):
             for _ in range(inferences_per_cycle):
                 self.interpreter.invoke()
-            time.sleep(1)
-
-            output_data = self.interpreter.get_tensor(self.output_details[0]['index'])
-
-            print("Input:")
-            print(input_data)
-            print("\nOutput:")
-            print(output_data)
 
 if _torch_available:
-    import torch
+    torch = importlib.import_module("torch")
+
     class TorchRunner(InferenceRunner):
-        def __init__(self, model_path,device):
-            super().__init__(model_path,device=device)
-            self._load_model(device=device) 
+        """PyTorch runner"""
 
-
-        def _load_model(self,from_state_dict=False,device="cpu"):
-
+        def __init__(self, model_path, device="cpu", from_state_dict=False):
+            super().__init__(model_path, device=device)
             self.device = torch.device(device)
+            self.from_state_dict = from_state_dict
+            self._load_model()
 
-            #Extract model info from the file name
+        def _load_model(self):
+            # Layer dimensions currently come from the established file naming convention.
+            # A typed layer manifest will replace this later.
+            
             self.params = self._extract_layer_info()
-            pprint(self.params)
-            #print(f"Model info - Layer: {self.layer_type}, Input size: {self.input_size}, Output size: {self.output_size}")
-            #Build the model architecture
             self.model = self._build_model()
 
-            if from_state_dict:
-                
-                #Load the state dict
-                state_dict = torch.load(self.model_path, map_location=self.device)
+            if self.from_state_dict:
+                state_dict = torch.load(
+                    self.model_path,
+                    map_location=self.device,
+                    weights_only=True,
+                )
                 self.model.load_state_dict(state_dict)
-            
+
             self.model.eval()
-            print(f" Torch Model loaded: {self.model_path}")
+            print(f"Torch model prepared from specification: {self.model_path}")
 
         def randomize_parameters(self):
             self.model.apply(
@@ -97,42 +103,44 @@ if _torch_available:
             )
             self.model.eval()
 
-        def run_inference(self, inferences_per_cycle=110):
-            with torch.no_grad():
+        def run_inference(self, inferences_per_cycle):
+            with torch.inference_mode():
                 for _ in range(inferences_per_cycle):
-                    output_data = self.model(self.input_data)
-                if self.device.type == "cuda" and torch.cuda.is_available():
-                    torch.cuda.synchronize(self.device)
-        
-        def measure_cycle_inference_time(self, inferences_per_cycle=110):
-            """returns the inferences time for a cycle in ms"""            
-            if self.device.type == "cuda" and torch.cuda.is_available():
-                torch.cuda.synchronize(self.device)
-            gen_start = time.perf_counter()            
-            self.run_inference(inferences_per_cycle)
-            if self.device.type == "cuda" and torch.cuda.is_available():
-                torch.cuda.synchronize(self.device)
-            gen_end = time.perf_counter()
-                
-            return (gen_end - gen_start) * 1000
-        
-        def _extract_layer_info(self):
+                    self.model(self.input_data)
 
-            #String path treatment to extract model info
+        def synchronize(self):
+            if self.device.type == "cuda" and torch.cuda.is_available():
+                torch.cuda.synchronize(self.device)
+
+        def _extract_layer_info(self):
+            """Extract and validate the current Linear/Conv filename schema."""
             filename = os.path.splitext(os.path.basename(self.model_path))[0]
-            
             parts = filename.split("_")
             layer_type = parts[0].lower()
-            params = [int(p) for p in parts[1:]]  # Convert all but the first part to integers
-    
+            try:
+                params = [int(p) for p in parts[1:]]
+            except ValueError as error:
+                raise ValueError(
+                    f"Invalid numeric layer parameters in model name: {filename}"
+                ) from error
+
             if layer_type == "linear":
+                if len(params) != 2:
+                    raise ValueError(
+                        "Linear model names must be Linear_<in_features>_<out_features>"
+                    )
                 return  {
                         "type": "linear",
                         "in_features": params[0],
                         "out_features": params[1],
-                        }   
+                        }
 
             elif layer_type == "conv":
+                if len(params) != 4:
+                    raise ValueError(
+                        "Conv model names must be "
+                        "Conv_<in_channels>_<image_size>_<kernel_size>_<padding>"
+                    )
                 return  {
                         "type": "conv",
                         "in_channels": params[0],
@@ -141,38 +149,41 @@ if _torch_available:
                         "padding": params[3],
                         }
 
-            else:
-                return  {
-                        "type": layer_type,
-                        "params": params
-                        }
+            raise ValueError(f"Unsupported layer type in model name: {layer_type}")
 
         def _build_model(self):
-            #Build the model architecture
-            
-            #Add here other layer types if needed (e.g., Conv2d, LSTM, etc.)
-            if self.params["type"]=="linear":
-                model = torch.nn.Linear(self.params["in_features"],self.params["out_features"]).to(self.device)
-        
-            elif self.params["type"]=="conv":
-                model = torch.nn.Conv2d(self.params["in_channels"],1,kernel_size=self.params["kernel_size"],padding=self.params["padding"]).to(self.device)
-            
-            return model
-            
+            """Build the layer represented by the validated model name."""
+            if self.params["type"] == "linear":
+                return torch.nn.Linear(
+                    self.params["in_features"],
+                    self.params["out_features"],
+                ).to(self.device)
+
+            if self.params["type"] == "conv":
+                return torch.nn.Conv2d(
+                    self.params["in_channels"],
+                    1,
+                    kernel_size=self.params["kernel_size"],
+                    padding=self.params["padding"],
+                ).to(self.device)
+
+            raise ValueError(f"Unsupported layer type: {self.params['type']}")
+
         def generate_input(self):
-            with torch.no_grad():
-                if self.params["type"]=="linear":
+            """Generate a random input for the next burst."""
+            with torch.inference_mode():
+                if self.params["type"] == "linear":
                     shape = (
                             1,
-                            self.params["in_features"], 
+                            self.params["in_features"],
                             )
-            
-                elif self.params["type"]=="conv":
+
+                elif self.params["type"] == "conv":
                     shape = (
                             1,
                             self.params["in_channels"],
                             self.params["image_size"],
-                            self.params["image_size"], 
+                            self.params["image_size"],
                             )
 
                 else:
