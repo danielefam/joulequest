@@ -155,14 +155,16 @@ class RunManager:
     def _utc_now():
         return datetime.now(timezone.utc).isoformat()
 
-    def _emit_event(self, event, **fields):
+    def _emit_event(self, event, verbose=False, **fields):
         payload = {
             "event": event,
             "monotonic_seconds": time.monotonic(),
             "wall_time_utc": self._utc_now(),
             **fields,
+
         }
-        print(json.dumps(payload, sort_keys=True), flush=True)
+        if verbose:
+            print(json.dumps(payload, sort_keys=True), flush=True)
         return payload
 
     #gpt5.6
@@ -256,6 +258,7 @@ class RunManager:
             return None
         return Path(self.manifest_directory) / f"{campaign_id}.json"
 
+    #gpt5.6
     @staticmethod
     def _write_manifest(manifest, path):
         """Atomically replace the campaign manifest to avoid partial JSON."""
@@ -314,6 +317,7 @@ class RunManager:
         self.sleep_fn(self.warmup_cooldown_seconds)
         self._emit_event(
             "WARMUP_END",
+            verbose=True,
             campaign_id=campaign_id,
             **manifest["warmup"],
         )
@@ -326,6 +330,7 @@ class RunManager:
         }
         self._emit_event(
             "CALIBRATION_END",
+            verbose=True,
             campaign_id=campaign_id,
             **manifest["calibration"],
         )
@@ -349,6 +354,7 @@ class RunManager:
         runner.prepare_burst()
         start_event = self._emit_event(
             "BURST_START",
+            verbose=True,
             campaign_id=campaign_id,
             cycle=cycle,
             requested_inferences=inference_count,
@@ -364,6 +370,7 @@ class RunManager:
 
         end_event = self._emit_event(
             "BURST_END",
+            verbose=True,
             campaign_id=campaign_id,
             cycle=cycle,
             requested_inferences=result.requested_inferences,
@@ -462,6 +469,9 @@ class RunManager:
                 campaign_id,
                 plan,
             )
+
+            time_to_stop_measurements = 10
+            time.sleep(time_to_stop_measurements)
             self._complete_manifest(manifest, manifest_path, campaign_id)
             return manifest
 
@@ -475,6 +485,7 @@ class RunManager:
             self._write_manifest(manifest, manifest_path)
             self._emit_event(
                 "FAILED",
+                verbose=True,
                 campaign_id=campaign_id,
                 failure_type=type(error).__name__,
                 failure_message=str(error),
