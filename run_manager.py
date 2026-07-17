@@ -469,6 +469,9 @@ class RunManager:
                 campaign_id,
                 plan,
             )
+
+            time_to_stop_measurements = 10
+            time.sleep(time_to_stop_measurements)
             self._complete_manifest(manifest, manifest_path, campaign_id)
             return manifest
 
