@@ -354,7 +354,6 @@ class RunManager:
         runner.prepare_burst()
         start_event = self._emit_event(
             "BURST_START",
-            verbose=True,
             campaign_id=campaign_id,
             cycle=cycle,
             requested_inferences=inference_count,
@@ -370,7 +369,6 @@ class RunManager:
 
         end_event = self._emit_event(
             "BURST_END",
-            verbose=True,
             campaign_id=campaign_id,
             cycle=cycle,
             requested_inferences=result.requested_inferences,
