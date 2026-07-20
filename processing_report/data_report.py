@@ -1,6 +1,6 @@
 import pandas as pd
 import os
-import data_processing as dp
+import processing_report.data_processing as dp
 import argparse
 
 # Init your data holders

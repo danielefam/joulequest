@@ -7,7 +7,7 @@ from skimage.filters import threshold_otsu
 import argparse
 import numpy as np
 
-sampling_interval = 0.1
+sampling_interval = 0.01
 
 def load_data(csv_path):
     """
