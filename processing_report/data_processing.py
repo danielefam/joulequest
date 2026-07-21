@@ -6,8 +6,8 @@ from scipy.signal import butter, filtfilt
 from skimage.filters import threshold_otsu
 import argparse
 import numpy as np
+import json
 
-sampling_interval = 0.01
 
 def load_data(csv_path):
     """
@@ -54,7 +54,7 @@ def get_threshold(data):
     """
     return threshold_otsu(data) 
 
-def compute_means_variances(df, threshold):
+def compute_means_variances(df, threshold, sampling_interval, inferences_per_cycle):
     """
     Compute means and variances above and below a threshold.
     """
@@ -170,8 +170,8 @@ def compute_means_variances(df, threshold):
         intra_power_avg= (intra_activ_avg - intra_idle_avg)
         intra_power_var = (intra_activ_var + intra_idle_var)
 
-        intra_energy_avg = intra_power_avg * duration / 100000.0 #divided by 10000 to have energy for one inference instead of 10000 inferences
-        intra_energy_var = intra_power_var * (duration/100000.0)**2
+        intra_energy_avg = intra_power_avg * duration / inferences_per_cycle #divided by 10000 to have energy for one inference instead of 10000 inferences
+        intra_energy_var = intra_power_var * (duration/inferences_per_cycle)**2
 
         regions.append({
         'sampling_rate': sampling_interval,
@@ -218,7 +218,7 @@ def compute_means_variances(df, threshold):
 
     return results
 
-def show_data(df,filepath=None,save=False):
+def show_data(df, sampling_interval, filepath=None,save=False):
     """
     Display the smoothed data in a plot.
     """
@@ -278,9 +278,12 @@ def main():
     parser.add_argument(
          '-fs', '--freq', required=False, help='Sampling frequency (Hz)',default=10)
     parser.add_argument(
-         '-cutoff', '--cutoff',required=False, help=' Cutoff frequency (Hz)',default=0.1)
+         '-cutoff', '--cutoff',required=False, help=' Cutoff frequency (Hz)',default=4)
     parser.add_argument(
          '-w', '--window', type=int,required=False,help='window size for rolling average', default=30)
+    parser.add_argument(
+        '-mp', '--manifest_path', type=str, required=True, help='manifest_path', default='measurements_manifest')
+    
     args = parser.parse_args()
 
 
@@ -290,6 +293,14 @@ def main():
     cutoff = float(args.cutoff)
     window_size = int(args.window)
     csv_path = args.data
+    measurement_manifest_path = args.manifest_path
+
+    sampling_interval = 1/fs
+    
+
+    with open(measurement_manifest_path) as json_data:
+        measurement_manifest_json = json.load(json_data)
+    inferences_per_cycle = measurement_manifest_json['plan']['inferences_per_cycle']
 
     # Load data from CSV file
     df = load_data(csv_path)
@@ -309,7 +320,7 @@ def main():
     print("Threshold value:", threshold)
 
     #average_power_active,variance_active,average_power_idle,variance_idle= compute_means_variances(df['smoothed'], threshold)
-    results = compute_means_variances(df, threshold)
+    results = compute_means_variances(df, threshold, sampling_interval, inferences_per_cycle)
 
     print(f"Variance (active state, > threshold): {results['power_var_W2']:.5f} W²")
     print(f"Average power (active state, > threshold): {results['power_avg_W']:.5f} W")
@@ -322,7 +333,7 @@ def main():
     #print("Final Results: variance:", variance_active -  variance_idle)
 
     # Show the data
-    show_data(df)
+    show_data(df, sampling_interval)
 
 if __name__ == "__main__":
     main()

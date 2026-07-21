@@ -66,7 +66,7 @@ def process_file(csv_path, args, combined_axis):
         time_seconds,
         df["smoothed"],
         label=csv_path.stem,
-        linewidth=0.3,
+        linewidth=0.5,
     )
 
     figure, axis = plt.subplots(figsize=(14, 5))
