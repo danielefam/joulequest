@@ -52,9 +52,7 @@ def build_parser():
 def load_inferences_per_cycle(manifest_dir, csv_path):
     manifest_path = dp.get_manifest_file_path(manifest_dir, csv_path)
     if manifest_path is None:
-        raise FileNotFoundError(
-            f"No manifest found for {csv_path.name} in {manifest_dir}"
-        )
+        return None
 
     with manifest_path.open(encoding="utf-8") as manifest_file:
         manifest = json.load(manifest_file)
@@ -88,12 +86,20 @@ def process_file(csv_path, args, combined_axis):
 
     valid_smoothed = df["smoothed"].dropna()
     threshold = dp.get_threshold(valid_smoothed.to_numpy())
-    results = dp.compute_means_variances(
-        df,
-        threshold,
-        sampling_interval=1 / args.frequency,
-        inferences_per_cycle=inferences_per_cycle,
-    )
+    if inferences_per_cycle is None:
+        results = {
+            "power_avg_W": None,
+            "power_var_W2": None,
+            "energy_avg_J": None,
+            "energy_var_J2": None,
+        }
+    else:
+        results = dp.compute_means_variances(
+            df,
+            threshold,
+            sampling_interval=1 / args.frequency,
+            inferences_per_cycle=inferences_per_cycle,
+        )
 
     time_seconds = df["Sample"] / args.frequency
     combined_axis.plot(
@@ -113,11 +119,14 @@ def process_file(csv_path, args, combined_axis):
     axis.grid(True, alpha=0.3)
     axis.legend()
     figure.tight_layout()
-    figure.savefig(args.output_dir / f"{csv_path.stem}.pdf", format="pdf")
+    output_path = args.output_dir / csv_path.relative_to(args.data_dir)
+    output_path = output_path.with_suffix(".pdf")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(output_path, format="pdf")
     plt.close(figure)
 
     return {
-        "file": csv_path.name,
+        "file": str(csv_path.relative_to(args.data_dir)),
         "samples": len(df),
         "inferences_per_cycle": inferences_per_cycle,
         "threshold_W": threshold,
@@ -131,7 +140,7 @@ def process_file(csv_path, args, combined_axis):
 def main():
     args = build_parser().parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    csv_files = sorted(args.data_dir.glob("*.csv"))
+    csv_files = sorted(args.data_dir.rglob("*.csv"))
     if not csv_files:
         raise FileNotFoundError(f"No CSV files found in {args.data_dir}")
 
