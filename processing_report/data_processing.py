@@ -6,7 +6,8 @@ from scipy.signal import butter, filtfilt
 from skimage.filters import threshold_otsu
 import argparse
 import numpy as np
-import json
+import json, os
+from pathlib import Path
 
 
 def load_data(csv_path):
@@ -249,7 +250,7 @@ def show_data(df, sampling_interval, filepath=None,save=False):
     plt.close() 
 
 
-def get_average_power(df, kernel_size=11, fs=5, cutoff=0.1, window_size=30):
+def get_average_power(df,inferences_per_cycle, kernel_size=11, fs=100, cutoff=0.1, window_size=30):
     """
     Main function to compute average power from the data.
     """
@@ -263,11 +264,19 @@ def get_average_power(df, kernel_size=11, fs=5, cutoff=0.1, window_size=30):
     df["smoothed"] = average_data(df['lowpass_filtered'], window_size)
     # Compute threshold
     threshold = get_threshold(df['smoothed'].dropna().values)
-    results= compute_means_variances(df, threshold)
+    results= compute_means_variances(df, threshold, 1/fs, inferences_per_cycle)
 
     return results
 
-
+def get_manifest_file_path(measurements_manifest_dir_path, csv_path):
+    for _, _, files in os.walk(measurements_manifest_dir_path):
+        for file in files:
+            if os.path.basename(os.path.basename(csv_path).split('.')[0]) in file :
+                manifest_file_path = file
+                return Path(measurements_manifest_dir_path) / manifest_file_path
+    
+    
+    
 def main():
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -276,13 +285,13 @@ def main():
     parser.add_argument(
          '-k', '--kernel_size', required=False, help='kernel size for median filtering',default=11)
     parser.add_argument(
-         '-fs', '--freq', required=False, help='Sampling frequency (Hz)',default=10)
+         '-fs', '--freq', required=False, help='Sampling frequency (Hz)',default=100)
     parser.add_argument(
          '-cutoff', '--cutoff',required=False, help=' Cutoff frequency (Hz)',default=4)
     parser.add_argument(
          '-w', '--window', type=int,required=False,help='window size for rolling average', default=30)
     parser.add_argument(
-        '-mp', '--manifest_path', type=str, required=True, help='manifest_path', default='measurements_manifest')
+        '-mp', '--manifest_dir_path', type=str, required=True, help='path to the directory of the manifests', default='measurements_manifest')
     
     args = parser.parse_args()
 
@@ -293,12 +302,12 @@ def main():
     cutoff = float(args.cutoff)
     window_size = int(args.window)
     csv_path = args.data
-    measurement_manifest_path = args.manifest_path
+    measurements_manifest_dir_path = args.manifest_dir_path
 
     sampling_interval = 1/fs
     
-
-    with open(measurement_manifest_path) as json_data:
+    manifest_file_path = get_manifest_file_path(measurements_manifest_dir_path, csv_path)
+    with open(manifest_file_path) as json_data:
         measurement_manifest_json = json.load(json_data)
     inferences_per_cycle = measurement_manifest_json['plan']['inferences_per_cycle']
 
