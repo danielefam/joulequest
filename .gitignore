@@ -3,7 +3,7 @@ __pycache__/
 Docs/raspberry-pi-4-datasheet.pdf
 Docs/raspberry-pi-5-datasheet.pdf
 new_measures/
-docs_new/*
+docs_new/papers
 Plot
 linear_power_report.*
 tests
