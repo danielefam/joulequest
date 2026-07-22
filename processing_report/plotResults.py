@@ -1,12 +1,13 @@
 # Import Required Libraries
 import pandas as pd
 import matplotlib.pyplot as plt
+from pathlib import Path
 
 # Enable inline plotting for Jupyter
 #%matplotlib inline
 
 # Load CSV File
-csv_path = '/home/daniele/Desktop/tirocinio/energyBANERA-main/new_measures/Conv_1_32_3_0.csv'  # Change this to your CSV file path
+csv_path = Path(__file__).resolve().parents[1] / 'measurements' / 'Data' / 'Linear' / 'Linear_64_64.csv'  # Change this to your CSV file path
 df = pd.read_csv(csv_path)
 
 # Smooth the 'EVM1 POWER Results (W)' using a rolling mean

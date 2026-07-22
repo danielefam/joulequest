@@ -5,13 +5,14 @@ import seaborn as sns
 from scipy.signal import medfilt
 from scipy.signal import butter, filtfilt
 from skimage.filters import threshold_otsu
+from pathlib import Path
 
 
 # Enable inline plotting for Jupyter
 #%matplotlib inline
 
 # Load CSV File
-csv_path = '/home/frederic/Documents/BANERA/Code/Linear_2048_2048.csv'  # Change this to your CSV file path
+csv_path = Path(__file__).resolve().parents[1] / 'measurements' / 'Data' / 'Linear' / 'Linear_64_64.csv'  # Change this to your CSV file path
 df = pd.read_csv(csv_path)
 data=df['EVM1 POWER Results (W)']
 

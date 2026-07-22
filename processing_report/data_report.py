@@ -2,13 +2,15 @@ import pandas as pd
 import os
 import processing_report.data_processing as dp
 import argparse
+from pathlib import Path
 
 # Init your data holders
 detailed_rows = []
 
-layer_type = "conv_3_0"
-data_folder = "/home/daniele/Desktop/tirocinio/energyBANERA-main/Data/new_measures/jetson_nano/Conv_3_0"
-plot_folder = "/home/daniele/Desktop/tirocinio/energyBANERA-main/Plot/new_measures/jetson_nano/Conv_3_0"
+layer_type = "linear"
+repository_root = Path(__file__).resolve().parents[1]
+data_folder = repository_root / "measurements" / "Data" / "Linear"
+plot_folder = repository_root / "measurements" / "Plot" / "Linear"
 
 
 def build_layer_name(filename):
@@ -28,8 +30,8 @@ def build_layer_name(filename):
 def main():
     parser = argparse.ArgumentParser(
          formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument("--data_folder", type=str, default=data_folder, help="Path to the folder containing CSV data files.")
-    parser.add_argument("--plot_folder", type=str, default=plot_folder, help="Path to the folder where plots will be saved.")
+    parser.add_argument("--data_folder", type=Path, default=data_folder, help="Path to the folder containing CSV data files.")
+    parser.add_argument("--plot_folder", type=Path, default=plot_folder, help="Path to the folder where plots will be saved.")
     parser.add_argument("--output", type=str, default="", help="Output Excel path. If empty, it is saved in ../statistics/measures_statistics.xlsx.")
     args = parser.parse_args()
 
@@ -40,13 +42,13 @@ def main():
         raise FileNotFoundError(f"No CSV files found in: {args.data_folder}")
 
     for filename in data_files:
-        filepath = os.path.join(args.data_folder, filename)
+        filepath = args.data_folder / filename
 
         parts = filename.replace(".csv", "").split("_")
 
         # Create plot filename
         plot_filename = f"{os.path.splitext(filename)[0]}.svg"
-        plot_path = os.path.join(args.plot_folder, plot_filename)
+        plot_path = args.plot_folder / plot_filename
 
         df=pd.read_csv(filepath)
 
@@ -86,9 +88,9 @@ def main():
         "Plot link",
     ])
 
-    statistics_folder = os.path.normpath(os.path.join(args.data_folder, "..", "statistics"))
-    os.makedirs(statistics_folder, exist_ok=True)
-    output_path = args.output.strip() or os.path.join(statistics_folder, f"measures_statistics_{layer_type}.xlsx")
+    statistics_folder = args.data_folder.parent / "statistics"
+    statistics_folder.mkdir(parents=True, exist_ok=True)
+    output_path = Path(args.output) if args.output.strip() else statistics_folder / f"measures_statistics_{layer_type}.xlsx"
 
     # Write Excel report
     with pd.ExcelWriter(output_path, engine="xlsxwriter") as writer:

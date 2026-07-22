@@ -2,30 +2,29 @@ links:
 https://docs.pytorch.org/tutorials/intermediate/ax_multiobjective_nas_tutorial.html
 https://docs.pytorch.org/tutorials/intermediate/realtime_rpi.html
 
-secure copy of runner and run_manager from local machine to attilio one:
-
-scp /home/daniele/Desktop/tirocinio/energyBANERA-main/run_manager.py dfama-25@attilio.enst.fr:/home/dfama-25/banera_utils
-scp /home/daniele/Desktop/tirocinio/energyBANERA-main/runner.py dfama-25@attilio.enst.fr:/home/dfama-25/banera_utils
-scp /home/daniele/Desktop/tirocinio/energyBANERA-main/base_runner.py dfama-25@attilio.enst.fr:/home/dfama-25/banera_utils
-
 
 secure copy of runner and run_manager from attilio machine to the board:
 
-raspi4:
+jetson
+scp -o ProxyJump=dfama-25@attilio.enst.fr /home/daniele/Desktop/tirocinio/energyBANERA-main/run_manager.py jetson@10.42.0.83:/home/jetson
+scp -o ProxyJump=dfama-25@attilio.enst.fr /home/daniele/Desktop/tirocinio/energyBANERA-main/base_runner.py jetson@10.42.0.83:/home/jetson
+scp -o ProxyJump=dfama-25@attilio.enst.fr /home/daniele/Desktop/tirocinio/energyBANERA-main/runner.py jetson@10.42.0.83:/home/jetson
+
+raspi4 (to update):
 scp banera_utils/run_manager.py pi@10.42.0.185:/home/pi/energy_banera_19jun2026
 scp banera_utils/runner.py pi@10.42.0.185:/home/pi/energy_banera_19jun2026
 
-jetson_nano
-scp banera_utils/run_manager.py jetson@10.42.0.83:/home/jetson
-scp banera_utils/runner.py jetson@10.42.0.83:/home/jetson
-scp banera_utils/base_runner.py jetson@10.42.0.83:/home/jetson
 
 
 python run_manager.py --backend cuda --calibration_repetitions 4 --warmup_inferences 20 --sampling_rate_hz 100 --number_of_cycles 100 --sleep_time 0.7 --target_burst_seconds 0  --min_active_samples 50 --wait_for_acquisition --manifest_directory measurements_jetson --model Models/CPU/Linear/Linear_64_64.pt
 
 python run_manager.py --backend cuda --calibration_repetitions 4 --warmup_inferences 20 --sampling_rate_hz 100 --number_of_cycles 100 --sleep_time 0.7 --target_burst_seconds 0  --min_active_samples 50 --wait_for_acquisition --model Models/CPU/Linear/Linear_64_64.pt
 
+python ina226_serial_logger.py --shunt-ohms 0.012  --max-expected-current-a 5   --interval-ms 10   --output measurements/Data/Linear/Linear_.csv
+python ina226_serial_logger.py --shunt-ohms 0.012  --max-expected-current-a 5   --interval-ms 10   --output measurements/Data/Conv/Conv_.csv
 
 jetson_nano to attilio to local
 scp -r /home/jetson/measurements_jetson dfama-25@attilio.enst.fr:/home/dfama-25/banera_utils
 scp -r dfama-25@attilio.enst.fr:/home/dfama-25/banera_utils/measurements_jetson /home/daniele/Desktop/tirocinio/energyBANERA-main/measurements_jetson
+
+
