@@ -29,7 +29,7 @@ def build_parser():
         "--output-dir",
         type=Path,
         default=Path("/home/daniele/Desktop/tirocinio/energyBANERA-main/Plot/test"),
-        help="Directory receiving plots and the summary CSV.",
+        help="Directory receiving the summary CSV.",
     )
     parser.add_argument(
         "--manifest-dir",
@@ -41,11 +41,6 @@ def build_parser():
     parser.add_argument("--frequency", type=float, default=100.0)
     parser.add_argument("--cutoff", type=float, default=4.0)
     parser.add_argument("--window-size", type=int, default=30)
-    parser.add_argument(
-        "--show",
-        action="store_true",
-        help="Display the combined plot after processing.",
-    )
     return parser
 
 
@@ -119,10 +114,7 @@ def process_file(csv_path, args, combined_axis):
     axis.grid(True, alpha=0.3)
     axis.legend()
     figure.tight_layout()
-    output_path = args.output_dir / csv_path.relative_to(args.data_dir)
-    output_path = output_path.with_suffix(".pdf")
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    figure.savefig(output_path, format="pdf")
+    plt.show()
     plt.close(figure)
 
     return {
@@ -158,19 +150,14 @@ def main():
     combined_axis.grid(True, alpha=0.3)
     combined_axis.legend()
     combined_figure.tight_layout()
-    combined_figure.savefig(
-        args.output_dir / "all_measurements.pdf", format="pdf"
-    )
-    if args.show:
-        plt.show()
-    else:
-        plt.close(combined_figure)
+    plt.show()
+    plt.close(combined_figure)
 
     pd.DataFrame(summary_rows).to_csv(
         args.output_dir / "summary.csv", index=False
     )
     print(f"Processed {len(summary_rows)} files")
-    print(f"Plots and summary saved to: {args.output_dir}")
+    print(f"Summary saved to: {args.output_dir}")
 
 
 if __name__ == "__main__":
