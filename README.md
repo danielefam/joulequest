@@ -2,20 +2,6 @@
 
 This project runs small AI-model tests and can measure their power use with an INA226 device.
 
-## Where this folder is
-
-The project folder is:
-
-```text
-/home/daniele/Desktop/tirocinio/energyBANERA-main
-```
-
-Open a terminal in this folder before running commands:
-
-```bash
-cd /home/daniele/Desktop/tirocinio/energyBANERA-main
-```
-
 ## Main file
 
 The main file is `run_manager.py`.
