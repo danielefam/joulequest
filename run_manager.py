@@ -468,8 +468,11 @@ class RunManager:
                 plan,
             )
 
-            time_to_stop_measurements = 10
-            time.sleep(time_to_stop_measurements)
+            if self.wait_for_acquisition:
+                self.input_fn("Stop INA226 acquisition, then press Enter to write the manifest...")
+            else:
+                time_to_stop_measurements = 5
+                time.sleep(time_to_stop_measurements)
             self._complete_manifest(manifest, manifest_path, campaign_id)
             return manifest
 

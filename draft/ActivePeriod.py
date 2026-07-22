@@ -6,10 +6,11 @@ from scipy.signal import butter, filtfilt
 from skimage.filters import threshold_otsu
 import argparse
 import numpy as np
+from pathlib import Path
 
 import tpu_linear_data_processing_old as tpu
 
-csv_path = '/home/frederic/Documents/BANERA/Code/Linear_2048_2048.csv' 
+csv_path = Path(__file__).resolve().parents[1] / 'measurements' / 'Data' / 'Linear' / 'Linear_64_64.csv'
 df = pd.read_csv(csv_path)
 
 power = df['EVM1 POWER Results (W)'].values

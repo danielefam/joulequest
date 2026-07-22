@@ -12,6 +12,7 @@ import data_processing as dp
 
 
 POWER_COLUMN = "EVM1 POWER Results (W)"
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
 def build_parser():
@@ -22,13 +23,13 @@ def build_parser():
     parser.add_argument(
         "--data-dir",
         type=Path,
-        default=Path("/home/daniele/Desktop/tirocinio/energyBANERA-main/Data/test"),
+        default=REPOSITORY_ROOT / "measurements" / "Data" / "Linear",
         help="Directory containing measurement CSV files.",
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("/home/daniele/Desktop/tirocinio/energyBANERA-main/Plot/test"),
+        default=REPOSITORY_ROOT / "measurements" / "Plot" / "Linear",
         help="Directory receiving the summary CSV.",
     )
     parser.add_argument(
@@ -39,7 +40,7 @@ def build_parser():
     )
     parser.add_argument("--kernel-size", type=int, default=11)
     parser.add_argument("--frequency", type=float, default=100.0)
-    parser.add_argument("--cutoff", type=float, default=4.0)
+    parser.add_argument("--cutoff", type=float, default=4)
     parser.add_argument("--window-size", type=int, default=30)
     return parser
 
@@ -114,6 +115,7 @@ def process_file(csv_path, args, combined_axis):
     axis.grid(True, alpha=0.3)
     axis.legend()
     figure.tight_layout()
+    figure.savefig(args.output_dir / f"{csv_path.stem}.pdf", format="pdf")
     plt.show()
     plt.close(figure)
 
@@ -150,6 +152,9 @@ def main():
     combined_axis.grid(True, alpha=0.3)
     combined_axis.legend()
     combined_figure.tight_layout()
+    combined_figure.savefig(
+        args.output_dir / "smoothed_power_comparison.pdf", format="pdf"
+    )
     plt.show()
     plt.close(combined_figure)
 
