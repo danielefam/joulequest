@@ -22,13 +22,13 @@ def build_parser():
     parser.add_argument(
         "--data-dir",
         type=Path,
-        default=Path("Data/v3"),
+        default=Path("/home/daniele/Desktop/tirocinio/energyBANERA-main/Data/test"),
         help="Directory containing measurement CSV files.",
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("Plot/v3"),
+        default=Path("/home/daniele/Desktop/tirocinio/energyBANERA-main/Plot/test"),
         help="Directory receiving plots and the summary CSV.",
     )
     parser.add_argument(

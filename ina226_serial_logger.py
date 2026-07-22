@@ -42,14 +42,15 @@ def detect_port(requested_port: str | None) -> str:
         port.device
         for port in list_ports.comports()
         if (port.vid, port.pid) == (TI_SCB_VID, TI_SCB_PID)
-        or "MSP432 USB serial port" in (port.description or "")
+        or "msp432 usb serial port" in (port.description or "").lower()
     ]
     if len(candidates) == 1:
         return candidates[0]
     if not candidates:
         raise ProtocolError(
-            "No TI-SCB serial port found. Install SBAC253, connect the board, "
-            "or pass --port COMx."
+            "No TI-SCB serial port found. Connect the board, check "
+            "'python -m serial.tools.list_ports -v', or pass a port such as "
+            "--port /dev/ttyACM0."
         )
     raise ProtocolError(
         f"Multiple TI-SCB serial ports found ({', '.join(candidates)}); pass --port."
@@ -71,8 +72,9 @@ class ScbSerial:
             )
         except serial.SerialException as error:
             raise ProtocolError(
-                f"Cannot open {port}: {error}. Close the TI GUI and stop its "
-                "TICloudAgent process before using the CLI."
+                f"Cannot open {port}: {error}. Ensure no other process owns the "
+                "port and check read/write access; standard Ubuntu installations "
+                "grant access through the dialout group."
             ) from error
         time.sleep(0.25)
         self._serial.reset_input_buffer()
@@ -141,10 +143,13 @@ class ScbSerial:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Stream INA226EVM samples through a TI-SCB COM port."
+        description="Stream INA226EVM samples through a TI-SCB USB serial port."
     )
     parser.add_argument("--output", type=Path, required=True, help="Destination CSV")
-    parser.add_argument("--port", help="Serial port, for example COM4 (auto-detected if omitted)")
+    parser.add_argument(
+        "--port",
+        help="Serial port, for example /dev/ttyACM0 (auto-detected if omitted)",
+    )
     parser.add_argument("--baud", type=int, default=115200)
     parser.add_argument("--address", type=int_auto, default=0x40, help="INA226 I2C address")
     parser.add_argument(
