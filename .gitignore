@@ -7,5 +7,5 @@ docs_new/papers
 Plot
 linear_power_report.*
 tests
-Data/
+measurements/
 measurements_jetson
