@@ -71,6 +71,7 @@ First capture ten samples. `0.01` below is only an example; replace it with the 
 python ina226_serial_logger.py \
     --address 0x40 \
     --shunt-ohms 0.01 \
+    --max-expected-current-a 3 \
     --interval-ms 100 \
     --samples 10 \
     --output Data/ina226_smoke_test.csv
@@ -83,17 +84,18 @@ python ina226_serial_logger.py \
     --port /dev/ttyACM0 \
     --address 0x40 \
     --shunt-ohms 0.012 \
+    --max-expected-current-a 3 \
     --interval-ms 100 \
     --output Data/test/test.csv
 ```
 
-Replace `/dev/ttyACM0` with the stable `/dev/serial/by-id/...` path for unattended runs. The logger refuses to overwrite an existing file unless `--overwrite` is supplied. Rows are flushed as they are written, and the output includes `Sample` and `EVM1 POWER Results (W)`, which are already consumed by this repository's processing scripts. Address, shunt resistance, configuration register, calibration register, requested interval, raw readings, UTC time, and host elapsed time are retained for reproducibility.
+Replace `/dev/ttyACM0` with the stable `/dev/serial/by-id/...` path for unattended runs. Set `--max-expected-current-a` for the device and workload under test: for example, use `3` for a Raspberry Pi 4 campaign expected to remain below 3 A, and select a larger value when the load can exceed that range. The logger refuses to overwrite an existing file unless `--overwrite` is supplied. Rows are flushed as they are written, and the output includes `Sample` and `EVM1 POWER Results (W)`, which are already consumed by this repository's processing scripts. Address, shunt resistance, maximum expected current, effective current LSB, configuration register, calibration register, requested interval, raw readings, UTC time, and host elapsed time are retained for reproducibility.
 
 For a capture that must survive an SSH disconnect, start `tmux new -s ina226`, activate the virtual environment, enter the repository, and run the same command. Detach with `Ctrl+B`, then `D`; reconnect later with `tmux attach -t ina226`.
 
 ### Live validation
 
-On 2026-07-22, Ubuntu with Linux 6.8 enumerated the connected `1CBE:00AB` TI-SCB as `/dev/ttyACM0`. The logger selected INA226 address `0x40`, read configuration `0x4127`, and captured two rows at a requested 100 ms interval. The CSV contained all expected power columns. Calibration was `0x0000`, so the main current and power columns correctly used the documented shunt-voltage calculation fallback.
+On 2026-07-22, Ubuntu with Linux 6.8 enumerated the connected `1CBE:00AB` TI-SCB as `/dev/ttyACM0`. With `Rshunt = 0.012 ohm` and `Imax = 3 A`, the logger wrote and verified calibration `0x1234`, obtained an effective Current LSB of approximately `91.559 uA`, and captured a repository-compatible CSV row containing the new calibration metadata. An earlier test of the pre-calibration logger found `0x0000` after reset; explicit calibration at every launch now removes that dependency on previous GUI state.
 
 The earlier Windows capture on 2026-07-21 read configuration `0x4127`, calibration `0x0AEC`, and captured 10 rows over 0.922 seconds. Together these checks validate serial transport and CSV compatibility on both hosts. They do not certify the connected setup's absolute measurement accuracy; the changed calibration value also demonstrates why every run must record and inspect register `0x05`.
 
@@ -163,13 +165,27 @@ $$
 P = R_{03} \times 25 \times Current\_LSB
 $$
 
-After reset, `CAL` can be zero, in which case the INA226 current and power registers are not usable. The included logger still computes:
+The logger uses the required maximum expected current to choose the requested scale:
+
+$$
+Requested\ Current\_LSB = \frac{I_{max}}{32768}
+$$
+
+It then truncates the calibration value to the 16-bit register range, writes register `0x05`, and reads it back before acquisition. A mismatch aborts the run rather than recording incorrectly scaled Current and Power values. The effective scale saved in the CSV is recomputed from the integer calibration value:
+
+$$
+Effective\ Current\_LSB = \frac{0.00512}{CAL \times R_{shunt}}
+$$
+
+For `Rshunt = 0.012 ohm`, `Imax = 3 A` produces `CAL = 0x1234`; `Imax = 5 A` produces `CAL = 0x0AEC`. A smaller range improves resolution, but `Imax` must remain above the actual peak current. The logger also rejects an expected current above the INA226 shunt-voltage limit for the selected resistor.
+
+The independently calculated diagnostic columns still use:
 
 $$
 I_{calculated} = \frac{V_{shunt}}{R_{shunt}}, \qquad P_{calculated} = V_{bus} I_{calculated}
 $$
 
-If `CAL` is nonzero, the main current and power columns use registers `0x04` and `0x03`; the independently calculated values remain in separate diagnostic columns. Read back register `0x05` and record the physical shunt value with every experiment. Do not copy a calibration value from another setup unless its shunt resistance and expected current range are identical.
+The main current and power columns use registers `0x04` and `0x03`; the independently calculated values remain in separate diagnostic columns. Choose the expected current for every device and workload rather than copying a calibration value from another setup.
 
 ## 5. Higher-rate USB bulk mode
 
