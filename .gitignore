@@ -9,3 +9,5 @@ linear_power_report.*
 tests
 measurements/
 measurements_jetson
+docs_new/*
+!docs_new/adaptive_burst_measurement.md
