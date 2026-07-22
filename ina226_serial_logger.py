@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import sys
 import time
 from datetime import datetime, timezone
@@ -19,6 +20,10 @@ TI_SCB_VID = 0x1CBE
 TI_SCB_PID = 0x00AB
 SHUNT_VOLTAGE_LSB_V = 2.5e-6
 BUS_VOLTAGE_LSB_V = 1.25e-3
+SHUNT_VOLTAGE_FULL_SCALE_V = 0.08192
+CURRENT_REGISTER_STEPS = 1 << 15
+CALIBRATION_CONSTANT = 0.00512
+MAX_CALIBRATION_VALUE = 0xFFFF
 
 
 class ProtocolError(RuntimeError):
@@ -32,6 +37,19 @@ def int_auto(value: str) -> int:
 def signed_16(value: int) -> int:
     value &= 0xFFFF
     return value - 0x10000 if value & 0x8000 else value
+
+
+def calculate_calibration(max_expected_current_a: float, shunt_ohms: float) -> int:
+    requested_current_lsb_a = max_expected_current_a / CURRENT_REGISTER_STEPS
+    calibration = math.floor(
+        CALIBRATION_CONSTANT / (requested_current_lsb_a * shunt_ohms)
+    )
+    if not 1 <= calibration <= MAX_CALIBRATION_VALUE:
+        raise ValueError(
+            "--max-expected-current-a and --shunt-ohms produce a calibration "
+            "outside the INA226 16-bit range"
+        )
+    return calibration
 
 
 def detect_port(requested_port: str | None) -> str:
@@ -140,6 +158,13 @@ class ScbSerial:
             raise ProtocolError(f"No value returned for register 0x{address:02x}")
         return value & 0xFFFF
 
+    def write_register(self, address: int, value: int) -> None:
+        if not 0 <= address <= 0xFF:
+            raise ValueError("Register address must fit in 8 bits")
+        if not 0 <= value <= 0xFFFF:
+            raise ValueError("Register value must fit in 16 bits")
+        self.command(f"wreg {address:x} {value:x}")
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -158,6 +183,12 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="Installed shunt resistance in ohms; verify the EVM resistor marking",
     )
+    parser.add_argument(
+        "--max-expected-current-a",
+        type=float,
+        required=True,
+        help="Maximum expected current in amperes; sets current/power scaling",
+    )
     parser.add_argument("--interval-ms", type=float, default=100.0)
     parser.add_argument("--samples", type=int, default=0, help="0 records until Ctrl+C")
     parser.add_argument("--duration-s", type=float, default=0.0, help="0 disables the limit")
@@ -169,6 +200,15 @@ def build_parser() -> argparse.ArgumentParser:
 def validate_args(args: argparse.Namespace) -> None:
     if args.shunt_ohms <= 0:
         raise ValueError("--shunt-ohms must be positive")
+    if args.max_expected_current_a <= 0:
+        raise ValueError("--max-expected-current-a must be positive")
+    shunt_current_limit_a = SHUNT_VOLTAGE_FULL_SCALE_V / args.shunt_ohms
+    if args.max_expected_current_a > shunt_current_limit_a:
+        raise ValueError(
+            f"--max-expected-current-a exceeds the {shunt_current_limit_a:.6g} A "
+            "shunt-voltage limit for the selected resistance"
+        )
+    calculate_calibration(args.max_expected_current_a, args.shunt_ohms)
     if args.interval_ms <= 0:
         raise ValueError("--interval-ms must be positive")
     if args.samples < 0 or args.duration_s < 0 or args.timeout_s <= 0:
@@ -187,6 +227,8 @@ def run(args: argparse.Namespace) -> int:
         "Elapsed Time (s)",
         "I2C Address",
         "Shunt Resistance (ohm)",
+        "Maximum Expected Current (A)",
+        "Current LSB (A)",
         "Configuration Raw",
         "Requested Interval (ms)",
         "EVM1 SHUNT VOLTAGE Results (V)",
@@ -206,24 +248,28 @@ def run(args: argparse.Namespace) -> int:
     try:
         device.set_device(args.address)
         configuration_raw = device.read_register(0x00)
+        requested_calibration = calculate_calibration(
+            args.max_expected_current_a, args.shunt_ohms
+        )
+        device.write_register(0x05, requested_calibration)
         calibration_raw = device.read_register(0x05)
-        current_lsb_a = (
-            0.00512 / (calibration_raw * args.shunt_ohms)
-            if calibration_raw
-            else None
+        if calibration_raw != requested_calibration:
+            raise ProtocolError(
+                "INA226 calibration verification failed: "
+                f"wrote 0x{requested_calibration:04x}, "
+                f"read 0x{calibration_raw:04x}"
+            )
+        current_lsb_a = CALIBRATION_CONSTANT / (
+            calibration_raw * args.shunt_ohms
         )
         print(
             f"TI-SCB {port}; INA226 address=0x{args.address:02x}; "
             f"configuration=0x{configuration_raw:04x}; "
-            f"calibration=0x{calibration_raw:04x}; output={args.output}",
+            f"max-current={args.max_expected_current_a:.12g} A; "
+            f"calibration=0x{calibration_raw:04x}; "
+            f"current-lsb={current_lsb_a:.12g} A; output={args.output}",
             file=sys.stderr,
         )
-        if current_lsb_a is None:
-            print(
-                "Calibration is zero: current and power will be calculated from "
-                "shunt voltage, bus voltage, and --shunt-ohms.",
-                file=sys.stderr,
-            )
 
         with args.output.open(output_mode, newline="", encoding="utf-8", buffering=1) as output:
             writer = csv.DictWriter(output, fieldnames=fieldnames)
@@ -249,12 +295,8 @@ def run(args: argparse.Namespace) -> int:
                 bus_voltage_v = bus_raw * BUS_VOLTAGE_LSB_V
                 calculated_current_a = shunt_voltage_v / args.shunt_ohms
                 calculated_power_w = bus_voltage_v * calculated_current_a
-                if current_lsb_a is None:
-                    current_a = calculated_current_a
-                    power_w = calculated_power_w
-                else:
-                    current_a = signed_16(current_raw) * current_lsb_a
-                    power_w = power_raw * 25 * current_lsb_a
+                current_a = signed_16(current_raw) * current_lsb_a
+                power_w = power_raw * 25 * current_lsb_a
 
                 writer.writerow(
                     {
@@ -263,6 +305,10 @@ def run(args: argparse.Namespace) -> int:
                         "Elapsed Time (s)": f"{elapsed_seconds:.9f}",
                         "I2C Address": f"0x{args.address:02x}",
                         "Shunt Resistance (ohm)": f"{args.shunt_ohms:.12g}",
+                        "Maximum Expected Current (A)": (
+                            f"{args.max_expected_current_a:.12g}"
+                        ),
+                        "Current LSB (A)": f"{current_lsb_a:.12g}",
                         "Configuration Raw": f"0x{configuration_raw:04x}",
                         "Requested Interval (ms)": f"{args.interval_ms:.12g}",
                         "EVM1 SHUNT VOLTAGE Results (V)": f"{shunt_voltage_v:.12g}",
