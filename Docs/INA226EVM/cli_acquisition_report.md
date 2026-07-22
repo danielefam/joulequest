@@ -59,7 +59,7 @@ python -m pip install pyserial
 First capture ten samples. `0.01` below is only an example; replace it with the resistance actually fitted to the EVM. SBOU276 instructs the user to fit a 2512 resistor at `R1` or connect an external shunt, so there is no universal value to assume. Using the wrong value scales current and power by the same error.
 
 ```powershell
-python .\Docs\INA226EVM\ina226_serial_logger.py `
+python .\ina226_serial_logger.py `
     --port COM4 `
     --address 0x40 `
     --shunt-ohms 0.01 `
@@ -71,7 +71,7 @@ python .\Docs\INA226EVM\ina226_serial_logger.py `
 For a long run, omit `--samples`, optionally use `--duration-s`, and stop with `Ctrl+C`:
 
 ```powershell
-python .\Docs\INA226EVM\ina226_serial_logger.py `
+python .\ina226_serial_logger.py `
     --port COM4 `
     --address 0x40 `
     --shunt-ohms 0.01 `
