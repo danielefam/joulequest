@@ -2,6 +2,7 @@
 
 **Initial Windows validation:** 2026-07-21
 **Ubuntu migration and validation:** 2026-07-22
+**Serial rate characterization:** 2026-07-23
 **Scope:** Current INA226EVM detachable sensor card used with the TI Sensor Control Board (TI-SCB)
 
 This report interprets "without relying on the CLI" in the question as "without relying on the GUI, using a CLI."
@@ -16,6 +17,8 @@ The TI GUI and Windows USB driver are not required on Ubuntu. The TI-SCB firmwar
 TI does not currently publish a standalone INA226EVM command-line executable. The supported interface is the protocol described in section 4.2.4 of the INA226EVM User's Guide (SBOU276). A small host program must send those commands and write the replies to disk.
 
 For this repository, the recommended implementation is the included Ubuntu-compatible serial logger. It writes each sample to CSV immediately and retains no growing sample array, so a 50,000-point run does not have the GUI's memory/plotting failure mode. It can be launched over SSH and kept alive in `tmux`. Use USB bulk mode only when serial request/response polling is too slow.
+
+On the Ubuntu host characterized for this report, use `--interval-ms 10` (100 samples/s) as the maximum recommended serial-polling rate for unattended campaigns. An 8 ms interval (125 samples/s) was the fastest 1,000-row test with no logger deadline misses, but it leaves little scheduling margin. A back-to-back burst reached approximately 332 rows/s; that is a saturation measurement, not a reliable operating rate.
 
 ## 1. Ubuntu hardware and permission check
 
@@ -91,11 +94,19 @@ python ina226_serial_logger.py \
 
 Replace `/dev/ttyACM0` with the stable `/dev/serial/by-id/...` path for unattended runs. Set `--max-expected-current-a` for the device and workload under test: for example, use `3` for a Raspberry Pi 4 campaign expected to remain below 3 A, and select a larger value when the load can exceed that range. The logger refuses to overwrite an existing file unless `--overwrite` is supplied. Rows are flushed as they are written, and the output includes `Sample` and `EVM1 POWER Results (W)`, which are already consumed by this repository's processing scripts. Address, shunt resistance, maximum expected current, effective current LSB, configuration register, calibration register, requested interval, raw readings, UTC time, and host elapsed time are retained for reproducibility.
 
+For the currently connected Jetson Nano setup with `Rshunt = 0.012 ohm`, use `--max-expected-current-a 5` when 5 A covers the expected peak. This changes calibration and measurement resolution, but not the INA226 conversion cycle or serial polling rate. Keep `--interval-ms 10` for the recommended 100 samples/s campaign rate.
+
+`--interval-ms` requests the period between host polling attempts; it does not change the INA226 conversion-time or averaging bits. At startup the logger now decodes and prints the configured conversion cycle. It warns when the requested interval is shorter than that cycle, when the INA226 is in power-down, one-shot triggered, or single-channel continuous mode, and when the sampling loop misses a requested deadline. A finite run also reports its achieved row rate and deadline-miss count. Validate higher rates on the intended host and output filesystem rather than treating the requested interval as the achieved rate.
+
 For a capture that must survive an SSH disconnect, start `tmux new -s ina226`, activate the virtual environment, enter the repository, and run the same command. Detach with `Ctrl+B`, then `D`; reconnect later with `tmux attach -t ina226`.
 
 ### Live validation
 
 On 2026-07-22, Ubuntu with Linux 6.8 enumerated the connected `1CBE:00AB` TI-SCB as `/dev/ttyACM0`. With `Rshunt = 0.012 ohm` and `Imax = 3 A`, the logger wrote and verified calibration `0x1234`, obtained an effective Current LSB of approximately `91.559 uA`, and captured a repository-compatible CSV row containing the new calibration metadata. An earlier test of the pre-calibration logger found `0x0000` after reset; explicit calibration at every launch now removes that dependency on previous GUI state.
+
+On 2026-07-23, the same board and host were characterized at higher polling rates. Configuration `0x4127` selected continuous shunt-and-bus conversion, one-sample averaging, and 1.1 ms for each conversion, giving a 2.2 ms sensor cycle. A 1,000-row run at 10 ms achieved 100.026 rows/s with no deadline misses. The detailed boundary measurements are in section 6.
+
+The 10 ms test was repeated with the connected Jetson Nano setup and `Imax = 5 A`. The logger wrote and verified calibration `0x0AEC`, used an effective Current LSB of approximately `152.599 uA`, and captured 1,000 rows at 100.026 rows/s with no deadline misses. This confirms that the 100 samples/s recommendation extends to the 5 A scale on this host.
 
 The earlier Windows capture on 2026-07-21 read configuration `0x4127`, calibration `0x0AEC`, and captured 10 rows over 0.922 seconds. Together these checks validate serial transport and CSV compatibility on both hosts. They do not certify the connected setup's absolute measurement accuracy; the changed calibration value also demonstrates why every run must record and inspect register `0x05`.
 
@@ -177,7 +188,9 @@ $$
 Effective\ Current\_LSB = \frac{0.00512}{CAL \times R_{shunt}}
 $$
 
-For `Rshunt = 0.012 ohm`, `Imax = 3 A` produces `CAL = 0x1234`; `Imax = 5 A` produces `CAL = 0x0AEC`. A smaller range improves resolution, but `Imax` must remain above the actual peak current. The logger also rejects an expected current above the INA226 shunt-voltage limit for the selected resistor.
+For `Rshunt = 0.012 ohm`, `Imax = 3 A` produces `CAL = 0x1234` and an effective Current LSB of approximately `91.559 uA`; `Imax = 5 A` produces `CAL = 0x0AEC` and approximately `152.599 uA`. The corresponding Power LSB at 5 A is approximately `3.815 mW`. The wider 5 A range therefore has about 1.67 times coarser current and power resolution, but it does not change conversion timing. `Imax` must remain above the actual peak current.
+
+At 5 A, a `0.012 ohm` shunt drops 60 mV and dissipates 0.30 W. This is below the INA226 shunt-voltage full scale of 81.92 mV, which corresponds to approximately 6.827 A for this resistance. It is valid for the ADC range, but the fitted shunt, PCB path, wiring, and connectors must all be rated for 5 A and the shunt must have adequate power and thermal margin. The logger checks the ADC voltage limit; it cannot verify those physical ratings.
 
 The independently calculated diagnostic columns still use:
 
@@ -221,11 +234,29 @@ Bulk mode requires a host program that opens interface 0 (`Generic Bulk Device` 
 
 ## 6. Sampling limitations
 
-- The requested host interval is not necessarily the sensor update interval. INA226 conversion time and averaging are configured in register `0x00`; in shunt-and-bus continuous mode, one new result takes approximately `(shunt conversion time + bus conversion time) * averaging count`.
-- Polling faster than that produces duplicate conversions. Polling slower loses intermediate conversions.
-- Ubuntu userspace scheduling and USB do not provide hard real-time timestamps. Use `Elapsed Time (s)` for observed host timing; use the configured MCU period as the nominal spacing in bulk mode.
-- Four serial register reads may take longer than a short `--interval-ms`. The logger never queues an expanding backlog; it starts the next sample immediately when behind schedule.
-- For transient workloads, bulk mode gives better alignment because the SCB firmware reads the selected result registers as a sample set.
+There are three separate rate limits:
+
+1. The INA226 conversion cycle is set by register `0x00`. In shunt-and-bus continuous mode, its duration is `(shunt conversion time + bus conversion time) * averaging count`. Configuration `0x4127` therefore takes `(1.1 ms + 1.1 ms) * 1 = 2.2 ms`, or at most approximately 454.5 fresh conversion sets/s.
+2. One serial CSV row requires four complete `rreg` request/response transactions plus formatting and a file flush. This transport path saturated below the sensor ceiling.
+3. Ubuntu userspace, USB CDC, and filesystem writes are not hard real-time. A rate that works in a short idle-host test can still miss deadlines under load.
+
+The following measurements used the connected TI-SCB, Python 3, Linux 6.8, configuration `0x4127`, `Rshunt = 0.012 ohm`, `Imax = 3 A`, and output under `/tmp`. A deadline miss means the sampling loop completed a row after the next requested start deadline; the logger resets that deadline instead of building a backlog.
+
+| Requested interval | Nominal rate | Rows | Achieved rate | Deadline misses | p99 completion gap | Maximum gap |
+| -----------------: | -----------: | ---: | ------------: | --------------: | -----------------: | ----------: |
+| 0.1 ms | 10,000/s | 200 | 332.164/s | Not instrumented | Not recorded | 5.455 ms |
+| 5 ms | 200/s | 1,000 | 199.619/s | 8 | 5.769 ms | 7.240 ms |
+| 7 ms | 142.857/s | 1,000 | 142.921/s | 11 | 9.026 ms | 9.399 ms |
+| 8 ms | 125/s | 1,000 | approximately 125/s | 0 | 9.093 ms | 12.627 ms |
+| 10 ms | 100/s | 1,000 | 100.026/s | 0 | 10.851 ms | 11.985 ms |
+
+The unpaced 332 rows/s result is the observed burst ceiling, not a usable requested rate. The fastest tested 1,000-row run with no logger-detected deadline misses was 125 rows/s, but 100 rows/s (`--interval-ms 10`) is the recommended maximum for campaigns because it has more margin for host load and storage latency. The repository's existing 10 rows/s setting remains comfortably below this transport limit. Repeat a 1,000-row test on each acquisition host and real output filesystem; increase `--interval-ms` if the logger reports any deadline misses.
+
+These rate limits depend on configuration register `0x00`, serial/USB transaction latency, host scheduling, and storage latency. They do not depend on `--max-expected-current-a`, which only sets calibration and scaling before the loop begins. Repeating the 10 ms run at `Imax = 5 A` produced the same 100.026 rows/s with zero deadline misses; its p99 completion gap was 12.319 ms and its maximum gap was 13.767 ms.
+
+A zero deadline-miss count does not imply uniformly spaced timestamps. Linux sleep and USB completion jitter can produce one long gap followed by a shorter gap while preserving the average rate. Use `Elapsed Time (s)` for integration and observed timing, not `Sample * Requested Interval`.
+
+Polling faster than the configured sensor cycle can only reread old conversion data. Polling slower loses intermediate conversions. The logger reads shunt voltage, bus voltage, power, and current in four separate transactions, so those values are not an atomic sensor snapshot and may straddle conversion cycles even at a low row rate. This matters for short transients; USB bulk mode provides better sample-set alignment.
 
 ## 7. Alternative: detach the EVM and use I2C
 
@@ -236,9 +267,10 @@ Using the Raspberry Pi or Jetson being measured as the acquisition host changes 
 ## 8. Recommendation
 
 1. Use the included serial logger at the repository's current 10 Hz processing rate and verify its CSV against a short GUI export under a steady load.
-2. Confirm the physical shunt resistance and calibration register before comparing absolute watts.
-3. Move to the documented bulk stream only if measured serial throughput or sample alignment is insufficient.
-4. Keep acquisition and workload control in separate processes, use `tmux` or a service for SSH-launched campaigns, and record configuration, shunt value, address, sample interval, kernel/firmware version, and UTC start time alongside every run.
+2. If a higher rate is required, validate 100 Hz on the intended host and output filesystem with at least 1,000 rows and require zero reported deadline misses. Treat 125 Hz as a measured boundary, not a portable guarantee.
+3. Confirm the physical shunt resistance and calibration register before comparing absolute watts.
+4. Move to the documented bulk stream if more than 100 reliable rows/s or tighter register alignment is required.
+5. Keep acquisition and workload control in separate processes, use `tmux` or a service for SSH-launched campaigns, and record configuration, shunt value, address, sample interval, achieved rate, deadline misses, kernel/firmware version, and UTC start time alongside every run.
 
 ## Primary sources
 
