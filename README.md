@@ -6,22 +6,39 @@ INA226EVM connected through a TI-SCB serial device.
 ## Automated measurement
 
 `automated_measurement.py` is the primary entry point for one unattended
-experiment. It prepares the selected model, performs excluded warm-up and
-calibration, starts direct INA226 acquisition, executes the measured cycles,
-stops acquisition, and writes the paired artifacts without prompting.
+experiment in the two-host setup:
+
+```text
+PC connected to TI-SCB              Jetson reached through SSH
+automated_measurement.py  ------->  run_manager.py
+ina226_serial_logger.py              runner.py
+                                      base_runner.py
+```
+
+The PC starts the Jetson experiment over SSH. The Jetson performs model setup,
+excluded warm-up, and excluded calibration, then asks the PC to start local
+INA226 acquisition. After the measured cycles and idle guards, the Jetson asks
+the PC to stop acquisition before writing its final manifest. No interaction is
+required after starting the command.
 
 ```bash
 python automated_measurement.py \
-  --backend cpu \
-  --model measurements/Data/Linear/Linear_8192_8192.pt \
+  --runner-host [ssh destination] \
+  --remote-directory /home/jetson \
+  --remote-python python3 \
+  --remote-manifest-directory measurements_jetson \
+  --backend cuda \
+  --model Models/CPU/Linear/Linear_8192_8192.pt \
   --port /dev/serial/by-id/usb-Texas_Instruments_Generic_Bulk_Device_12345678-if01 \
   --output-directory measurements/runs \
   --shunt-ohms 0.012 \
   --max-expected-current-a 5.0
 ```
 
-Omit `--port` when exactly one TI-SCB device is connected and it can be
-auto-detected. Each command creates an unambiguous pair:
+`--model` and `--remote-directory` refer to paths on the Jetson. `--port` and
+`--output-directory` refer to the PC connected to the TI-SCB. Omit `--port`
+when exactly one TI-SCB device is connected and can be auto-detected. Each
+command creates an unambiguous local pair:
 
 ```text
 measurements/runs/<campaign_id>.csv
@@ -32,7 +49,22 @@ Acquisition begins only after model loading, warm-up, and adaptive calibration.
 The CSV contains the leading idle baseline, measured cycles, inter-cycle idle,
 trailing idle baseline, and `safety_margin_seconds`. The logger process exits
 before the final manifest is written, so manifest I/O is not present in the
-capture.
+capture. The Jetson also retains its original manifest under
+`--remote-manifest-directory`; the PC receives a copy automatically, so no
+manual `scp` is needed after a successful command.
+
+SSH must work without a password prompt because automation uses
+`BatchMode=yes`. Configure an SSH key first and verify it with:
+
+```bash
+ssh -o BatchMode=yes [ssh_destination] true
+```
+
+When a jump host is required, add for example:
+
+```bash
+--ssh-option ProxyJump=[jump host]
+```
 
 The command returns `0` for a clean campaign, `2` when model execution completes
 but acquisition is invalid, `1` for an experiment failure, and `130` after a
@@ -60,7 +92,8 @@ Use a model file that exists on your computer. The model name tells the program 
 ## Important files
 
 - `run_manager.py`: starts and manages the measurement.
-- `automated_measurement.py`: coordinates one runner and serial acquisition process.
+- `automated_measurement.py`: runs on the PC and coordinates SSH plus local acquisition.
+- `base_runner.py`: defines the common timed-burst runner contract.
 - `runner.py`: runs the model on CPU, CUDA, or Edge TPU.
 - `ina226_serial_logger.py`: saves measurements directly from the INA226 device to a CSV file.
 - `banera_pt_requirements.txt`: saved Python environment for PyTorch CPU/CUDA work.
@@ -85,6 +118,9 @@ These are the most useful settings:
 | `--target_burst_seconds` | Desired duration, in seconds, of each real cycle | `10` |
 | `--sampling_rate_hz` | INA226 samples per second | `10` |
 | `--wait_for_acquisition` | Stops and waits for you to start manual INA226 recording | off |
+| `--runner-host` | SSH destination running inference | none (single-host fallback) |
+| `--remote-directory` | Jetson directory containing `run_manager.py` | `.` |
+| `--remote-manifest-directory` | Manifest directory on the Jetson | `measurements_jetson` |
 
 The automated command accepts the same adaptive workload controls but does not
 accept `--wait_for_acquisition`, logger duration/sample limits, or overwrite.
@@ -105,21 +141,30 @@ python run_manager.py \
 
 ## Python environment
 
-Use the PyTorch requirements for CPU or CUDA work:
+On the PC connected to the TI-SCB, install pyserial:
 
 ```bash
-conda create --name banera_pt --file banera_pt_requirements.txt
-conda activate banera_pt
 python -m pip install -r Docs/INA226EVM/requirements.txt
 ```
 
-Use the TensorFlow requirements only for Edge TPU work:
+On the Jetson, use its JetPack-compatible PyTorch environment for CPU or CUDA.
+Copy only the inference-side scripts:
 
 ```bash
-conda create --name banera_tf --file banera_tf_requirements.txt
-conda activate banera_tf
-python -m pip install -r Docs/INA226EVM/requirements.txt
+scp run_manager.py runner.py base_runner.py \
+  [ssh destination]:/home/jetson/
 ```
+
+Keep these scripts on the PC:
+
+```text
+automated_measurement.py
+ina226_serial_logger.py
+```
+
+The no-SSH single-host fallback remains available by omitting `--runner-host`;
+that machine then needs all five runtime scripts and both backend and serial
+dependencies.
 
 ## More help
 

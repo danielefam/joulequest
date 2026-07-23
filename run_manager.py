@@ -13,6 +13,7 @@ import json
 import math
 import os
 import statistics
+import sys
 import time
 import uuid
 from dataclasses import asdict, dataclass
@@ -85,6 +86,90 @@ def calculate_capture_plan(number_of_cycles, estimated_burst_seconds, sleep_time
         capture_seconds=capture_seconds,
         capture_samples=math.ceil(capture_seconds * sampling_rate_hz),
     )
+
+
+class StdioAcquisitionController:
+    """Coordinate acquisition owned by the process controlling stdin/stdout."""
+
+    def __init__(self, input_stream=None, output_stream=None):
+        self.input_stream = input_stream or sys.stdin
+        self.output_stream = output_stream or sys.stdout
+        self.campaign_id = None
+        self.plan = None
+        self.stop_result = None
+
+    @staticmethod
+    def _utc_now():
+        return datetime.now(timezone.utc).isoformat()
+
+    def _emit(self, event, **fields):
+        payload = {
+            "event": event,
+            "monotonic_seconds": time.monotonic(),
+            "wall_time_utc": self._utc_now(),
+            **fields,
+        }
+        print(
+            json.dumps(payload, sort_keys=True),
+            file=self.output_stream,
+            flush=True,
+        )
+
+    def _read_result(self, expected_command):
+        line = self.input_stream.readline()
+        if not line:
+            raise RuntimeError(
+                f"Acquisition controller disconnected before {expected_command}"
+            )
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise RuntimeError(
+                "Acquisition controller sent invalid JSON"
+            ) from error
+        if payload.get("command") != expected_command:
+            raise RuntimeError(
+                "Expected acquisition command "
+                f"{expected_command}, received {payload.get('command')!r}"
+            )
+        if payload.get("campaign_id") != self.campaign_id:
+            raise RuntimeError("Acquisition command campaign ID does not match")
+        result = payload.get("result")
+        if not isinstance(result, dict):
+            raise RuntimeError("Acquisition command result must be a dictionary")
+        return result
+
+    def describe(self, campaign_id, plan):
+        self.campaign_id = campaign_id
+        self.plan = dict(plan)
+        return {
+            "status": "PENDING",
+            "control_protocol": "stdio_json_v1",
+            "acquisition_host": "ssh_client",
+        }
+
+    def start(self):
+        self._emit(
+            "ACQUISITION_START_REQUEST",
+            campaign_id=self.campaign_id,
+            **self.plan,
+        )
+        return self._read_result("ACQUISITION_STARTED")
+
+    def check_health(self):
+        return None
+
+    def stop(self):
+        if self.stop_result is not None:
+            return dict(self.stop_result)
+        if self.campaign_id is None:
+            return None
+        self._emit(
+            "ACQUISITION_STOP_REQUEST",
+            campaign_id=self.campaign_id,
+        )
+        self.stop_result = self._read_result("ACQUISITION_STOPPED")
+        return dict(self.stop_result)
 
 
 class RunManager:
@@ -640,7 +725,9 @@ def build_argument_parser():
     parser.add_argument("--leading_idle_seconds", type=float, default=5.0)
     parser.add_argument("--trailing_idle_seconds", type=float, default=5.0)
     parser.add_argument("--safety_margin_seconds", type=float, default=2.0)
-    parser.add_argument("--wait_for_acquisition", action="store_true", help="Pause after READY so manual INA226 acquisition can be started")
+    acquisition_group = parser.add_mutually_exclusive_group()
+    acquisition_group.add_argument("--wait_for_acquisition", action="store_true", help="Pause after READY so manual INA226 acquisition can be started")
+    acquisition_group.add_argument("--stdio_acquisition", action="store_true", help="Coordinate acquisition with the SSH client using JSON stdin/stdout")
     parser.add_argument("--manifest_directory", default=None, help="Directory receiving one JSON manifest per campaign")
     return parser
 
@@ -655,6 +742,9 @@ def main():
         from runner import TorchRunner
         runner_cls = TorchRunner
 
+    acquisition_controller = (
+        StdioAcquisitionController() if args.stdio_acquisition else None
+    )
     manager = RunManager(
         runner_cls=runner_cls,
         model_path=args.model,
@@ -677,9 +767,37 @@ def main():
         trailing_idle_seconds=args.trailing_idle_seconds,
         safety_margin_seconds=args.safety_margin_seconds,
         wait_for_acquisition=args.wait_for_acquisition,
+        acquisition_controller=acquisition_controller,
         manifest_directory=args.manifest_directory,
     )
-    manager.execute()
+    try:
+        manifest = manager.execute()
+    except (Exception, KeyboardInterrupt):
+        if args.stdio_acquisition and manager.last_manifest is not None:
+            print(
+                json.dumps(
+                    {
+                        "event": "RUN_MANIFEST",
+                        "campaign_id": manager.last_manifest.get("campaign_id"),
+                        "manifest": manager.last_manifest,
+                    },
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
+        raise
+    if args.stdio_acquisition:
+        print(
+            json.dumps(
+                {
+                    "event": "RUN_MANIFEST",
+                    "campaign_id": manifest["campaign_id"],
+                    "manifest": manifest,
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
 
 
 if __name__ == "__main__":

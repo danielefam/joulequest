@@ -3,6 +3,7 @@ import queue
 import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -39,6 +40,26 @@ class QueueStream:
         if line is None:
             raise StopIteration
         return line
+
+
+class CapturingInput:
+    def __init__(self):
+        self.lines = []
+
+    def write(self, line):
+        self.lines.append(line)
+        return len(line)
+
+    def flush(self):
+        return None
+
+
+class BrokenStream:
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        raise OSError("SSH stdout failed")
 
 
 class FakeProcess:
@@ -113,6 +134,48 @@ class FakeProcessFactory:
             campaign_id,
             ready=self.ready,
             exit_on_terminate=self.exit_on_terminate,
+        )
+        return self.process
+
+
+class FakeSshProcess:
+    def __init__(self, command, events, returncode=0):
+        self.command = command
+        self.stdin = CapturingInput()
+        self.stdout = QueueStream()
+        self.returncode = returncode
+        self.terminated = False
+        self.killed = False
+        for event in events:
+            self.stdout.push(event)
+        self.stdout.finish()
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+    def terminate(self):
+        self.terminated = True
+        self.returncode = -15
+
+    def kill(self):
+        self.killed = True
+        self.returncode = -9
+
+
+class FakeSshProcessFactory:
+    def __init__(self, events, returncode=0):
+        self.events = events
+        self.returncode = returncode
+        self.process = None
+
+    def __call__(self, command, **_kwargs):
+        self.process = FakeSshProcess(
+            command,
+            self.events,
+            returncode=self.returncode,
         )
         return self.process
 
@@ -224,6 +287,331 @@ class ProcessControllerTests(unittest.TestCase):
             self.assertEqual(factory.process.kill_calls, 1)
 
 
+class SshExperimentControllerTests(unittest.TestCase):
+    @staticmethod
+    def _args(**overrides):
+        settings = {
+            "backend": "cuda",
+            "model": "Models/CPU/Linear/Linear_64_64.pt",
+            "number_of_cycles": 2,
+            "sleep_time": 0.7,
+            "inferences_per_cycle": None,
+            "target_burst_seconds": 0.0,
+            "sampling_rate_hz": 100.0,
+            "min_active_samples": 50,
+            "warmup_inferences": 20,
+            "warmup_seconds": 0.0,
+            "warmup_cooldown_seconds": None,
+            "calibration_initial_inferences": 10,
+            "calibration_target_seconds": 0.5,
+            "calibration_repetitions": 4,
+            "max_relative_mad": 0.15,
+            "max_calibration_inferences": 1_000_000,
+            "leading_idle_seconds": 5.0,
+            "trailing_idle_seconds": 5.0,
+            "safety_margin_seconds": 2.0,
+        }
+        settings.update(overrides)
+        return SimpleNamespace(**settings)
+
+    @staticmethod
+    def _events(campaign_id, manifest):
+        return [
+            acquisition_event("WARMUP_START", campaign_id),
+            acquisition_event(
+                "READY",
+                campaign_id,
+                sampling_rate_hz=100.0,
+                capture_seconds=15.0,
+                capture_samples=1500,
+            ),
+            acquisition_event(
+                "ACQUISITION_START_REQUEST",
+                campaign_id,
+                sampling_rate_hz=100.0,
+                capture_seconds=15.0,
+                capture_samples=1500,
+            ),
+            acquisition_event("BURST_START", campaign_id, cycle=1),
+            acquisition_event("BURST_END", campaign_id, cycle=1),
+            acquisition_event("ACQUISITION_STOP_REQUEST", campaign_id),
+            acquisition_event("COMPLETE", campaign_id),
+            acquisition_event(
+                "RUN_MANIFEST",
+                campaign_id,
+                manifest=manifest,
+            ),
+        ]
+
+    def _controller(self, acquisition, factory, **overrides):
+        settings = {
+            "runner_host": "jetson@10.42.0.83",
+            "remote_directory": "/home/jetson",
+            "remote_python": "python3",
+            "remote_manifest_directory": "measurements_jetson",
+            "ssh_options": ["ProxyJump=dfama-25@attilio.enst.fr"],
+            "acquisition_controller": acquisition,
+            "startup_timeout_seconds": 1.0,
+            "process_factory": factory,
+        }
+        settings.update(overrides)
+        return automated.SshExperimentController(**settings)
+
+    def test_remote_run_controls_local_logger_and_returns_manifest(self):
+        campaign_id = "campaign-remote-123"
+        manifest = {
+            "campaign_id": campaign_id,
+            "status": "COMPLETE",
+            "quality_status": "OK",
+            "manifest_path": "/home/jetson/measurements_jetson/campaign.json",
+            "acquisition": {"status": "COMPLETE", "sample_count": 25},
+            "measurement": {"cycles": []},
+        }
+        factory = FakeSshProcessFactory(self._events(campaign_id, manifest))
+        acquisition = Mock()
+        acquisition.describe.return_value = {
+            "csv_path": f"/tmp/{campaign_id}.csv",
+            "sampling_rate_hz": 100.0,
+        }
+        acquisition.start.return_value = {"status": "RUNNING", "sample_count": 1}
+        acquisition.check_health.return_value = None
+        acquisition.stop.return_value = {"status": "COMPLETE", "sample_count": 25}
+        controller = self._controller(acquisition, factory)
+
+        returned = controller.execute(self._args())
+
+        self.assertEqual(returned, manifest)
+        acquisition.describe.assert_called_once()
+        acquisition.start.assert_called_once_with()
+        acquisition.stop.assert_called_once_with()
+        replies = [
+            json.loads(line)
+            for line in factory.process.stdin.lines
+        ]
+        self.assertEqual(
+            [reply["command"] for reply in replies],
+            ["ACQUISITION_STARTED", "ACQUISITION_STOPPED"],
+        )
+        self.assertTrue(all(
+            reply["campaign_id"] == campaign_id for reply in replies
+        ))
+        command = factory.process.command
+        self.assertEqual(command[0:4], ["ssh", "-T", "-o", "BatchMode=yes"])
+        self.assertIn("ProxyJump=dfama-25@attilio.enst.fr", command)
+        self.assertEqual(command[-2], "jetson@10.42.0.83")
+        self.assertIn("--stdio_acquisition", command[-1])
+        self.assertIn("--backend cuda", command[-1])
+
+    def test_local_logger_start_failure_is_reported_to_jetson(self):
+        campaign_id = "campaign-remote-failed"
+        manifest = {
+            "campaign_id": campaign_id,
+            "status": "COMPLETE",
+            "quality_status": "REVIEW",
+            "acquisition": {"status": "FAILED"},
+            "measurement": {"cycles": []},
+        }
+        factory = FakeSshProcessFactory(self._events(campaign_id, manifest))
+        acquisition = Mock()
+        acquisition.describe.return_value = {
+            "csv_path": f"/tmp/{campaign_id}.csv",
+        }
+        acquisition.start.side_effect = RuntimeError("TI-SCB unavailable")
+        acquisition.stop.return_value = None
+        controller = self._controller(acquisition, factory)
+
+        returned = controller.execute(self._args())
+
+        self.assertEqual(returned["quality_status"], "REVIEW")
+        replies = [json.loads(line) for line in factory.process.stdin.lines]
+        self.assertEqual(replies[0]["result"]["status"], "FAILED")
+        self.assertIn("TI-SCB unavailable", replies[0]["result"]["failure"]["message"])
+        self.assertEqual(replies[1]["result"]["status"], "FAILED")
+
+    def test_runtime_logger_failure_survives_successful_cleanup(self):
+        acquisition = Mock()
+        controller = self._controller(
+            acquisition,
+            FakeSshProcessFactory([]),
+        )
+        controller.acquisition_result = {
+            "status": "RUNNING",
+            "csv_path": "/tmp/campaign.csv",
+        }
+        acquisition.check_health.side_effect = RuntimeError("serial disconnected")
+        acquisition.stop.return_value = {
+            "status": "COMPLETE",
+            "sample_count": 8,
+        }
+
+        controller._check_local_acquisition()
+        result = controller._stop_local_acquisition()
+
+        self.assertEqual(result["status"], "FAILED")
+        self.assertIn("serial disconnected", result["failure"]["message"])
+
+    def test_remote_manifest_is_saved_next_to_local_csv(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manifest = {
+                "campaign_id": "campaign-remote-123",
+                "manifest_path": (
+                    "/home/jetson/measurements_jetson/campaign-remote-123.json"
+                ),
+                "acquisition": {
+                    "csv_path": str(
+                        Path(temp_dir) / "campaign-remote-123.csv"
+                    )
+                },
+            }
+
+            path = automated.persist_local_manifest(manifest, temp_dir)
+            automated.persist_local_manifest(manifest, temp_dir)
+            persisted = json.loads(path.read_text(encoding="utf-8"))
+
+            self.assertEqual(path.name, "campaign-remote-123.json")
+            self.assertEqual(persisted["manifest_path"], str(path.resolve()))
+            self.assertEqual(
+                persisted["remote_manifest_path"],
+                "/home/jetson/measurements_jetson/campaign-remote-123.json",
+            )
+
+    def test_manifest_is_fetched_when_stream_ends_before_manifest_event(self):
+        campaign_id = "campaign-fallback"
+        failed_manifest = {
+            "campaign_id": campaign_id,
+            "status": "FAILED",
+            "acquisition": {"status": "FAILED"},
+        }
+        factory = FakeSshProcessFactory(
+            [acquisition_event("WARMUP_START", campaign_id)],
+            returncode=1,
+        )
+        fetch = Mock(
+            return_value=SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(failed_manifest),
+            )
+        )
+        controller = self._controller(Mock(), factory, run_factory=fetch)
+
+        returned = controller.execute(self._args())
+
+        self.assertEqual(returned, failed_manifest)
+        fetch.assert_called_once()
+        self.assertIn(
+            "measurements_jetson/campaign-fallback.json",
+            fetch.call_args.args[0][-1],
+        )
+
+    def test_reader_thread_failure_is_reported_directly(self):
+        process = FakeSshProcess(["ssh"], [], returncode=1)
+        process.stdout = BrokenStream()
+        factory = Mock(return_value=process)
+        controller = self._controller(Mock(), factory)
+
+        with self.assertRaisesRegex(
+            automated.RemoteExperimentError,
+            "SSH stdout failed",
+        ):
+            controller.execute(self._args())
+
+    def test_failed_manifest_with_zero_ssh_exit_is_rejected(self):
+        campaign_id = "campaign-status-mismatch"
+        manifest = {
+            "campaign_id": campaign_id,
+            "status": "FAILED",
+        }
+        factory = FakeSshProcessFactory(
+            [
+                acquisition_event("WARMUP_START", campaign_id),
+                acquisition_event(
+                    "RUN_MANIFEST",
+                    campaign_id,
+                    manifest=manifest,
+                ),
+            ],
+            returncode=0,
+        )
+        controller = self._controller(Mock(), factory)
+
+        with self.assertRaisesRegex(
+            automated.RemoteExperimentError,
+            "failed manifest with SSH exit code 0",
+        ):
+            controller.execute(self._args())
+
+    def test_real_subprocess_completes_bidirectional_handshake(self):
+        remote_program = textwrap.dedent(
+            """
+            import json
+            import sys
+            import time
+
+            campaign_id = "campaign-real-pipes"
+
+            def emit(event, **fields):
+                print(json.dumps({
+                    "event": event,
+                    "campaign_id": campaign_id,
+                    "monotonic_seconds": time.monotonic(),
+                    "wall_time_utc": "2026-07-23T12:00:00+00:00",
+                    **fields,
+                }), flush=True)
+
+            emit(
+                "ACQUISITION_START_REQUEST",
+                sampling_rate_hz=100.0,
+                capture_seconds=1.0,
+                capture_samples=100,
+            )
+            started = json.loads(sys.stdin.readline())
+            assert started["command"] == "ACQUISITION_STARTED"
+            emit("BURST_START", cycle=1)
+            emit("BURST_END", cycle=1)
+            emit("ACQUISITION_STOP_REQUEST")
+            stopped = json.loads(sys.stdin.readline())
+            assert stopped["command"] == "ACQUISITION_STOPPED"
+            manifest = {
+                "campaign_id": campaign_id,
+                "status": "COMPLETE",
+                "quality_status": "OK",
+                "acquisition": {"status": "COMPLETE", "sample_count": 10},
+                "measurement": {"cycles": []},
+            }
+            emit("COMPLETE")
+            emit("RUN_MANIFEST", manifest=manifest)
+            """
+        )
+
+        def process_factory(_command, **kwargs):
+            return subprocess.Popen(
+                [sys.executable, "-u", "-c", remote_program],
+                **kwargs,
+            )
+
+        acquisition = Mock()
+        acquisition.describe.return_value = {
+            "csv_path": "/tmp/campaign-real-pipes.csv",
+        }
+        acquisition.start.return_value = {"status": "RUNNING"}
+        acquisition.check_health.return_value = None
+        acquisition.stop.return_value = {
+            "status": "COMPLETE",
+            "sample_count": 10,
+        }
+        controller = self._controller(
+            acquisition,
+            process_factory,
+        )
+
+        manifest = controller.execute(self._args())
+
+        self.assertEqual(manifest["campaign_id"], "campaign-real-pipes")
+        self.assertEqual(manifest["status"], "COMPLETE")
+        acquisition.start.assert_called_once_with()
+        acquisition.stop.assert_called_once_with()
+
+
 class CommandResultTests(unittest.TestCase):
     @staticmethod
     def _args():
@@ -256,6 +644,12 @@ class CommandResultTests(unittest.TestCase):
             leading_idle_seconds=0.0,
             trailing_idle_seconds=0.0,
             safety_margin_seconds=0.0,
+            runner_host=None,
+            remote_directory=".",
+            remote_python="python3",
+            remote_manifest_directory="measurements_jetson",
+            ssh_option=[],
+            remote_startup_timeout_s=60.0,
         )
 
     def _run_main(self, execute_result=None, execute_error=None):
@@ -281,8 +675,7 @@ class CommandResultTests(unittest.TestCase):
         with (
             patch.object(automated, "build_argument_parser", return_value=parser),
             patch.object(automated, "Ina226ProcessController"),
-            patch.object(automated, "select_runner", return_value=object),
-            patch.object(automated, "RunManager", return_value=manager),
+            patch.object(automated, "build_local_manager", return_value=manager),
             patch("builtins.print") as output,
         ):
             exit_code = automated.main()
@@ -332,6 +725,89 @@ class CommandResultTests(unittest.TestCase):
                 automated.select_runner("cpu")
             with self.assertRaisesRegex(RuntimeError, "requires tflite_runtime"):
                 automated.select_runner("tpu")
+
+    def test_main_uses_ssh_runner_and_persists_remote_manifest(self):
+        args = self._args()
+        args.runner_host = "jetson@10.42.0.83"
+        manifest = {
+            "campaign_id": "campaign-remote-main",
+            "status": "COMPLETE",
+            "quality_status": "OK",
+            "acquisition": {"status": "COMPLETE", "sample_count": 12},
+            "measurement": {"cycles": []},
+        }
+        parser = Mock()
+        parser.parse_args.return_value = args
+        local_acquisition = Mock()
+        remote = Mock()
+        remote.execute.return_value = manifest
+
+        with (
+            patch.object(automated, "build_argument_parser", return_value=parser),
+            patch.object(
+                automated,
+                "Ina226ProcessController",
+                return_value=local_acquisition,
+            ),
+            patch.object(
+                automated,
+                "SshExperimentController",
+                return_value=remote,
+            ) as remote_cls,
+            patch.object(automated, "persist_local_manifest") as persist,
+            patch.object(
+                automated,
+                "build_local_manager",
+                side_effect=AssertionError("local runner must not be used"),
+            ),
+            patch("builtins.print") as output,
+        ):
+            exit_code = automated.main()
+
+        self.assertEqual(exit_code, 0)
+        remote.execute.assert_called_once_with(args)
+        persist.assert_called_once_with(manifest, args.output_directory)
+        self.assertIs(
+            remote_cls.call_args.kwargs["acquisition_controller"],
+            local_acquisition,
+        )
+        report = json.loads(output.call_args.args[0])
+        self.assertEqual(report["campaign_id"], "campaign-remote-main")
+        self.assertEqual(manifest["orchestration"]["mode"], "ssh")
+
+    def test_main_persists_received_manifest_when_ssh_reports_error(self):
+        args = self._args()
+        args.runner_host = "jetson@10.42.0.83"
+        manifest = {
+            "campaign_id": "campaign-remote-error",
+            "status": "FAILED",
+            "acquisition": {"status": "FAILED"},
+        }
+        parser = Mock()
+        parser.parse_args.return_value = args
+        remote = Mock()
+        remote.manifest = manifest
+        remote.execute.side_effect = automated.RemoteExperimentError(
+            "SSH transport failed"
+        )
+
+        with (
+            patch.object(automated, "build_argument_parser", return_value=parser),
+            patch.object(automated, "Ina226ProcessController"),
+            patch.object(
+                automated,
+                "SshExperimentController",
+                return_value=remote,
+            ),
+            patch.object(automated, "prepare_remote_manifest") as persist,
+            patch("builtins.print") as output,
+        ):
+            exit_code = automated.main()
+
+        self.assertEqual(exit_code, 1)
+        persist.assert_called_once_with(manifest, args)
+        report = json.loads(output.call_args.args[0])
+        self.assertEqual(report["campaign_id"], "campaign-remote-error")
 
 
 if __name__ == "__main__":
