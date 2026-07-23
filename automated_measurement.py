@@ -9,7 +9,6 @@ import os
 import posixpath
 import queue
 import shlex
-import socket
 import subprocess
 import sys
 import threading
@@ -24,6 +23,23 @@ class AcquisitionProcessError(RuntimeError):
 
 class RemoteExperimentError(RuntimeError):
     """Raised when the Jetson experiment cannot be controlled over SSH."""
+
+
+CONNECTION_CONFIG_KEYS = {
+    "runner_host",
+    "jump_host",
+    "remote_directory",
+    "remote_python",
+    "remote_manifest_directory",
+    "ssh_connect_timeout_s",
+    "ssh_options",
+}
+CONNECTION_DEFAULTS = {
+    "remote_directory": ".",
+    "remote_python": "python3",
+    "remote_manifest_directory": "measurements_jetson",
+    "ssh_connect_timeout_s": 10.0,
+}
 
 
 class Ina226ProcessController:
@@ -715,6 +731,16 @@ class SshExperimentController:
                 except subprocess.TimeoutExpired:
                     self.process.kill()
                     self.process.wait()
+            if self.reader_thread is not None:
+                self.reader_thread.join(timeout=0.2)
+            for stream_name in ("stdin", "stdout"):
+                stream = getattr(self.process, stream_name, None)
+                close = getattr(stream, "close", None)
+                if callable(close):
+                    try:
+                        close()
+                    except OSError:
+                        pass
 
 
 def persist_local_manifest(manifest, output_directory):
@@ -724,12 +750,7 @@ def persist_local_manifest(manifest, output_directory):
     output_directory = Path(output_directory)
     output_directory.mkdir(parents=True, exist_ok=True)
     path = output_directory / f"{campaign_id}.json"
-    remote_manifest_path = manifest.get("manifest_path")
-    if (
-        remote_manifest_path is not None
-        and "remote_manifest_path" not in manifest
-    ):
-        manifest["remote_manifest_path"] = remote_manifest_path
+    manifest.pop("remote_manifest_path", None)
     manifest["manifest_path"] = str(path.resolve())
     temporary_path = path.with_suffix(path.suffix + ".tmp")
     temporary_path.write_text(
@@ -745,12 +766,88 @@ def prepare_remote_manifest(manifest, args):
         "orchestration",
         {
             "mode": "ssh",
-            "runner_host": args.runner_host,
-            "remote_directory": args.remote_directory,
-            "acquisition_host": socket.gethostname(),
+            "runner_role": "inference_host",
+            "acquisition_role": "controller_host",
         },
     )
     return persist_local_manifest(manifest, args.output_directory)
+
+
+def load_connection_config(path):
+    if path is None:
+        return {}
+    path = Path(path)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as error:
+        raise ValueError(f"Connection config does not exist: {path}") from error
+    except json.JSONDecodeError as error:
+        raise ValueError(f"Connection config is not valid JSON: {path}") from error
+    if not isinstance(payload, dict):
+        raise ValueError("Connection config must contain one JSON object")
+    unknown_keys = sorted(set(payload) - CONNECTION_CONFIG_KEYS)
+    if unknown_keys:
+        raise ValueError(
+            "Unknown connection config keys: " + ", ".join(unknown_keys)
+        )
+    for key in (
+        "runner_host",
+        "jump_host",
+        "remote_directory",
+        "remote_python",
+        "remote_manifest_directory",
+    ):
+        if key in payload and payload[key] is not None:
+            if not isinstance(payload[key], str) or not payload[key].strip():
+                raise ValueError(f"Connection config {key} must be a nonempty string")
+    if "ssh_connect_timeout_s" in payload:
+        timeout = payload["ssh_connect_timeout_s"]
+        if not isinstance(timeout, (int, float)) or timeout <= 0:
+            raise ValueError(
+                "Connection config ssh_connect_timeout_s must be positive"
+            )
+    if "ssh_options" in payload:
+        options = payload["ssh_options"]
+        if not isinstance(options, list) or not all(
+            isinstance(option, str) and option.strip() for option in options
+        ):
+            raise ValueError(
+                "Connection config ssh_options must be a list of strings"
+            )
+    return payload
+
+
+def apply_connection_config(args):
+    config = load_connection_config(args.connection_config)
+    for key in (
+        "runner_host",
+        "jump_host",
+        "remote_directory",
+        "remote_python",
+        "remote_manifest_directory",
+        "ssh_connect_timeout_s",
+    ):
+        command_value = getattr(args, key)
+        if command_value is None:
+            setattr(args, key, config.get(key, CONNECTION_DEFAULTS.get(key)))
+    config_options = list(config.get("ssh_options", []))
+    args.ssh_option = [*config_options, *(args.ssh_option or [])]
+    return args
+
+
+def build_ssh_options(jump_host, connect_timeout_seconds, extra_options):
+    options = list(extra_options or [])
+    option_names = {
+        option.partition("=")[0].strip().lower()
+        for option in options
+    }
+    if jump_host is not None and "proxyjump" not in option_names:
+        options.insert(0, f"ProxyJump={jump_host}")
+    if "connecttimeout" not in option_names:
+        options.append(f"ConnectTimeout={connect_timeout_seconds:g}")
+    if "connectionattempts" not in option_names:
+        options.append("ConnectionAttempts=1")
+    return options
 
 
 def build_argument_parser():
@@ -787,23 +884,34 @@ def build_argument_parser():
     parser.add_argument("--trailing_idle_seconds", type=float, default=5.0)
     parser.add_argument("--safety_margin_seconds", type=float, default=2.0)
     parser.add_argument(
+        "--connection-config",
+        type=Path,
+        default=None,
+        help="Ignored local JSON file containing SSH host settings",
+    )
+    parser.add_argument(
         "--runner-host",
         default=None,
         help="SSH destination running inference",
     )
     parser.add_argument(
+        "--jump-host",
+        default=None,
+        help="SSH jump host used to reach the inference host",
+    )
+    parser.add_argument(
         "--remote-directory",
-        default=".",
+        default=None,
         help="Remote directory containing run_manager.py",
     )
     parser.add_argument(
         "--remote-python",
-        default="python3",
+        default=None,
         help="Remote Python executable or command prefix",
     )
     parser.add_argument(
         "--remote-manifest-directory",
-        default="measurements_jetson",
+        default=None,
         help="Manifest directory on the inference host",
     )
     parser.add_argument(
@@ -811,6 +919,12 @@ def build_argument_parser():
         action="append",
         default=[],
         help="Additional ssh -o option; may be repeated",
+    )
+    parser.add_argument(
+        "--ssh-connect-timeout-s",
+        type=float,
+        default=None,
+        help="SSH TCP connection timeout for each host",
     )
     parser.add_argument(
         "--remote-startup-timeout-s",
@@ -925,7 +1039,7 @@ def build_result_report(
 
 
 def main():
-    args = build_argument_parser().parse_args()
+    args = apply_connection_config(build_argument_parser().parse_args())
     command_started = time.monotonic()
     command_started_at_utc = datetime.now(timezone.utc).isoformat()
     manager = None
@@ -951,7 +1065,11 @@ def main():
                 remote_directory=args.remote_directory,
                 remote_python=args.remote_python,
                 remote_manifest_directory=args.remote_manifest_directory,
-                ssh_options=args.ssh_option,
+                ssh_options=build_ssh_options(
+                    args.jump_host,
+                    args.ssh_connect_timeout_s,
+                    args.ssh_option,
+                ),
                 acquisition_controller=controller,
                 startup_timeout_seconds=args.remote_startup_timeout_s,
             )

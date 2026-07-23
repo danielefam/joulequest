@@ -130,9 +130,7 @@ non-interactive SSH. No interaction is required after the command starts.
 
 ```bash
 python automated_measurement.py \
-  --runner-host [ssh destination] \
-  --remote-directory /home/jetson \
-  --remote-manifest-directory measurements_jetson \
+  --connection-config measurement_hosts.local.json \
   --backend cuda \
   --model Models/CPU/Linear/Linear_8192_8192.pt \
   --port /dev/serial/by-id/usb-Texas_Instruments_Generic_Bulk_Device_12345678-if01 \
@@ -152,7 +150,8 @@ needs `automated_measurement.py` and `ina226_serial_logger.py`. The TI serial
 device path and local output directory are PC paths; the model, remote working
 directory, and remote manifest directory are Jetson paths. SSH must be
 non-interactive; use repeatable `--ssh-option` arguments for options such as a
-`ProxyJump`.
+custom identity file. Store host-specific settings in the ignored
+`measurement_hosts.local.json`, created from `measurement_hosts.example.json`.
 
 ### Manual fallback
 
