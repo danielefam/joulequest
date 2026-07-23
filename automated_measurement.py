@@ -5,7 +5,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import posixpath
 import queue
+import shlex
+import socket
 import subprocess
 import sys
 import threading
@@ -13,11 +17,13 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from run_manager import RunManager
-
 
 class AcquisitionProcessError(RuntimeError):
     """Raised when the INA226 logger cannot provide a valid capture."""
+
+
+class RemoteExperimentError(RuntimeError):
+    """Raised when the Jetson experiment cannot be controlled over SSH."""
 
 
 class Ina226ProcessController:
@@ -358,6 +364,395 @@ class Ina226ProcessController:
         return dict(self.stop_result)
 
 
+class SshExperimentController:
+    """Run RunManager on the Jetson while acquisition remains local."""
+
+    def __init__(
+        self,
+        runner_host,
+        remote_directory,
+        remote_python,
+        remote_manifest_directory,
+        ssh_options,
+        acquisition_controller,
+        startup_timeout_seconds=60.0,
+        process_factory=subprocess.Popen,
+        run_factory=subprocess.run,
+        monotonic_fn=time.monotonic,
+    ):
+        if startup_timeout_seconds <= 0:
+            raise ValueError("remote startup timeout must be positive")
+        self.runner_host = runner_host
+        self.remote_directory = remote_directory
+        self.remote_python = remote_python
+        self.remote_manifest_directory = remote_manifest_directory
+        self.ssh_options = list(ssh_options or [])
+        self.acquisition_controller = acquisition_controller
+        self.startup_timeout_seconds = startup_timeout_seconds
+        self.process_factory = process_factory
+        self.run_factory = run_factory
+        self.monotonic_fn = monotonic_fn
+        self.process = None
+        self.reader_thread = None
+        self.lines = queue.Queue()
+        self.campaign_id = None
+        self.manifest = None
+        self.acquisition_result = None
+        self.acquisition_stopped = False
+
+    @staticmethod
+    def _utc_now():
+        return datetime.now(timezone.utc).isoformat()
+
+    def _remote_arguments(self, args):
+        arguments = [
+            "run_manager.py",
+            "--backend",
+            args.backend,
+            "--model",
+            args.model,
+            "--number_of_cycles",
+            str(args.number_of_cycles),
+            "--sleep_time",
+            str(args.sleep_time),
+            "--target_burst_seconds",
+            str(args.target_burst_seconds),
+            "--sampling_rate_hz",
+            str(args.sampling_rate_hz),
+            "--min_active_samples",
+            str(args.min_active_samples),
+            "--warmup_inferences",
+            str(args.warmup_inferences),
+            "--warmup_seconds",
+            str(args.warmup_seconds),
+            "--calibration_initial_inferences",
+            str(args.calibration_initial_inferences),
+            "--calibration_target_seconds",
+            str(args.calibration_target_seconds),
+            "--calibration_repetitions",
+            str(args.calibration_repetitions),
+            "--max_relative_mad",
+            str(args.max_relative_mad),
+            "--max_calibration_inferences",
+            str(args.max_calibration_inferences),
+            "--leading_idle_seconds",
+            str(args.leading_idle_seconds),
+            "--trailing_idle_seconds",
+            str(args.trailing_idle_seconds),
+            "--safety_margin_seconds",
+            str(args.safety_margin_seconds),
+            "--manifest_directory",
+            self.remote_manifest_directory,
+            "--stdio_acquisition",
+        ]
+        if args.inferences_per_cycle is not None:
+            arguments.extend(
+                ["--inferences_per_cycle", str(args.inferences_per_cycle)]
+            )
+        if args.warmup_cooldown_seconds is not None:
+            arguments.extend(
+                [
+                    "--warmup_cooldown_seconds",
+                    str(args.warmup_cooldown_seconds),
+                ]
+            )
+        return arguments
+
+    def build_command(self, args):
+        remote_tokens = [
+            *shlex.split(self.remote_python),
+            *self._remote_arguments(args),
+        ]
+        remote_command = (
+            f"cd {shlex.quote(self.remote_directory)} && exec "
+            + " ".join(shlex.quote(token) for token in remote_tokens)
+        )
+        command = ["ssh", "-T", "-o", "BatchMode=yes"]
+        for option in self.ssh_options:
+            command.extend(["-o", option])
+        command.extend([self.runner_host, remote_command])
+        return command
+
+    def _ssh_prefix(self):
+        command = ["ssh", "-T", "-o", "BatchMode=yes"]
+        for option in self.ssh_options:
+            command.extend(["-o", option])
+        command.append(self.runner_host)
+        return command
+
+    def _fetch_remote_manifest(self):
+        if self.campaign_id is None:
+            return None
+        remote_path = posixpath.join(
+            self.remote_manifest_directory,
+            f"{self.campaign_id}.json",
+        )
+        remote_command = (
+            f"cd {shlex.quote(self.remote_directory)} && "
+            f"cat -- {shlex.quote(remote_path)}"
+        )
+        try:
+            result = self.run_factory(
+                [*self._ssh_prefix(), remote_command],
+                capture_output=True,
+                text=True,
+                timeout=10.0,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if result.returncode != 0:
+            return None
+        try:
+            manifest = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            return None
+        return manifest if isinstance(manifest, dict) else None
+
+    def _read_stdout(self):
+        try:
+            for line in self.process.stdout:
+                self.lines.put(line)
+        except Exception as error:
+            self.lines.put(error)
+        finally:
+            self.lines.put(None)
+
+    def _send_result(self, command, result):
+        payload = {
+            "command": command,
+            "campaign_id": self.campaign_id,
+            "result": result,
+        }
+        self.process.stdin.write(json.dumps(payload, sort_keys=True) + "\n")
+        self.process.stdin.flush()
+
+    def _failure_result(self, error, base=None):
+        if (
+            base is not None
+            and base.get("status") == "FAILED"
+            and isinstance(base.get("failure"), dict)
+        ):
+            return dict(base)
+        return {
+            **(base or {}),
+            "status": "FAILED",
+            "failed_at_utc": self._utc_now(),
+            "failure": {
+                "type": type(error).__name__,
+                "message": str(error),
+            },
+        }
+
+    def _start_local_acquisition(self, event):
+        description = self.acquisition_controller.describe(
+            self.campaign_id,
+            event,
+        )
+        try:
+            started = self.acquisition_controller.start()
+            self.acquisition_result = {**description, **started}
+        except Exception as error:
+            self.acquisition_result = self._failure_result(error, description)
+        self._send_result("ACQUISITION_STARTED", self.acquisition_result)
+
+    def _check_local_acquisition(self):
+        if (
+            self.acquisition_result is None
+            or self.acquisition_result.get("status") == "FAILED"
+            or self.acquisition_stopped
+        ):
+            return
+        try:
+            result = self.acquisition_controller.check_health()
+            if result is not None:
+                self.acquisition_result.update(result)
+        except Exception as error:
+            self.acquisition_result = self._failure_result(
+                error,
+                self.acquisition_result,
+            )
+
+    def _stop_local_acquisition(self):
+        if self.acquisition_stopped:
+            return self.acquisition_result
+        acquisition_already_failed = (
+            self.acquisition_result is not None
+            and self.acquisition_result.get("status") == "FAILED"
+        )
+        try:
+            stopped = self.acquisition_controller.stop()
+            if stopped is not None and not acquisition_already_failed:
+                self.acquisition_result = {
+                    **(self.acquisition_result or {}),
+                    **stopped,
+                }
+        except Exception as error:
+            self.acquisition_result = self._failure_result(
+                error,
+                self.acquisition_result,
+            )
+        self.acquisition_stopped = True
+        return self.acquisition_result or {
+            "status": "FAILED",
+            "failure": {
+                "type": "AcquisitionProcessError",
+                "message": "Local acquisition was never started",
+            },
+        }
+
+    def _handle_event(self, event, raw_line):
+        event_name = event.get("event")
+        event_campaign_id = event.get("campaign_id")
+        if not isinstance(event_name, str):
+            raise RemoteExperimentError("Remote JSON payload has no event name")
+        if not isinstance(event_campaign_id, str) or not event_campaign_id:
+            raise RemoteExperimentError(
+                f"Remote event {event_name} has no campaign_id"
+            )
+        if self.campaign_id is None:
+            self.campaign_id = event_campaign_id
+        elif event_campaign_id != self.campaign_id:
+            raise RemoteExperimentError(
+                "Remote event campaign ID does not match the experiment"
+            )
+
+        if event_name == "ACQUISITION_START_REQUEST":
+            self._start_local_acquisition(event)
+        elif event_name == "ACQUISITION_STOP_REQUEST":
+            result = self._stop_local_acquisition()
+            self._send_result("ACQUISITION_STOPPED", result)
+        elif event_name == "RUN_MANIFEST":
+            manifest = event.get("manifest")
+            if not isinstance(manifest, dict):
+                raise RemoteExperimentError(
+                    "Jetson returned an invalid manifest payload"
+                )
+            self.manifest = manifest
+        else:
+            print(raw_line.rstrip(), flush=True)
+        self._check_local_acquisition()
+
+    def execute(self, args):
+        self.process = self.process_factory(
+            self.build_command(args),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=None,
+            text=True,
+            bufsize=1,
+        )
+        if self.process.stdin is None or self.process.stdout is None:
+            raise RemoteExperimentError("SSH process pipes were not created")
+        self.reader_thread = threading.Thread(
+            target=self._read_stdout,
+            name="jetson-event-reader",
+            daemon=True,
+        )
+        self.reader_thread.start()
+        startup_deadline = self.monotonic_fn() + self.startup_timeout_seconds
+        received_event = False
+        reader_finished = False
+
+        try:
+            while True:
+                try:
+                    raw_line = self.lines.get(timeout=0.1)
+                except queue.Empty:
+                    raw_line = ""
+                if isinstance(raw_line, Exception):
+                    raise RemoteExperimentError(
+                        f"Failed to read Jetson stdout: {raw_line}"
+                    ) from raw_line
+                if raw_line is None:
+                    reader_finished = True
+                elif raw_line:
+                    line = raw_line.strip()
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        print(f"[jetson] {line}", file=sys.stderr, flush=True)
+                    else:
+                        received_event = True
+                        self._handle_event(event, raw_line)
+
+                if not received_event and self.monotonic_fn() >= startup_deadline:
+                    raise RemoteExperimentError(
+                        "Timed out waiting for the first Jetson event"
+                    )
+                if reader_finished and self.process.poll() is not None:
+                    break
+
+            return_code = self.process.wait()
+            if self.manifest is None:
+                self.manifest = self._fetch_remote_manifest()
+            if self.manifest is None:
+                raise RemoteExperimentError(
+                    "Jetson exited without returning its JSON manifest "
+                    f"(SSH exit code {return_code})"
+                )
+            manifest_status = self.manifest.get("status")
+            if manifest_status not in ("COMPLETE", "FAILED"):
+                raise RemoteExperimentError(
+                    f"Jetson returned invalid manifest status {manifest_status!r}"
+                )
+            if manifest_status == "COMPLETE" and return_code != 0:
+                raise RemoteExperimentError(
+                    "Jetson reported a complete campaign but SSH exited with "
+                    f"code {return_code}"
+                )
+            if manifest_status == "FAILED" and return_code == 0:
+                raise RemoteExperimentError(
+                    "Jetson returned a failed manifest with SSH exit code 0"
+                )
+            return self.manifest
+        finally:
+            if not self.acquisition_stopped and self.acquisition_result is not None:
+                self._stop_local_acquisition()
+            if self.process.poll() is None:
+                self.process.terminate()
+                try:
+                    self.process.wait(timeout=5.0)
+                except subprocess.TimeoutExpired:
+                    self.process.kill()
+                    self.process.wait()
+
+
+def persist_local_manifest(manifest, output_directory):
+    campaign_id = manifest.get("campaign_id")
+    if not campaign_id:
+        raise RemoteExperimentError("Jetson manifest has no campaign_id")
+    output_directory = Path(output_directory)
+    output_directory.mkdir(parents=True, exist_ok=True)
+    path = output_directory / f"{campaign_id}.json"
+    remote_manifest_path = manifest.get("manifest_path")
+    if (
+        remote_manifest_path is not None
+        and "remote_manifest_path" not in manifest
+    ):
+        manifest["remote_manifest_path"] = remote_manifest_path
+    manifest["manifest_path"] = str(path.resolve())
+    temporary_path = path.with_suffix(path.suffix + ".tmp")
+    temporary_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    os.replace(temporary_path, path)
+    return path
+
+
+def prepare_remote_manifest(manifest, args):
+    manifest.setdefault(
+        "orchestration",
+        {
+            "mode": "ssh",
+            "runner_host": args.runner_host,
+            "remote_directory": args.remote_directory,
+            "acquisition_host": socket.gethostname(),
+        },
+    )
+    return persist_local_manifest(manifest, args.output_directory)
+
+
 def build_argument_parser():
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -391,6 +786,38 @@ def build_argument_parser():
     parser.add_argument("--leading_idle_seconds", type=float, default=5.0)
     parser.add_argument("--trailing_idle_seconds", type=float, default=5.0)
     parser.add_argument("--safety_margin_seconds", type=float, default=2.0)
+    parser.add_argument(
+        "--runner-host",
+        default=None,
+        help="SSH destination running inference",
+    )
+    parser.add_argument(
+        "--remote-directory",
+        default=".",
+        help="Remote directory containing run_manager.py",
+    )
+    parser.add_argument(
+        "--remote-python",
+        default="python3",
+        help="Remote Python executable or command prefix",
+    )
+    parser.add_argument(
+        "--remote-manifest-directory",
+        default="measurements_jetson",
+        help="Manifest directory on the inference host",
+    )
+    parser.add_argument(
+        "--ssh-option",
+        action="append",
+        default=[],
+        help="Additional ssh -o option; may be repeated",
+    )
+    parser.add_argument(
+        "--remote-startup-timeout-s",
+        type=float,
+        default=60.0,
+        help="Maximum wait for the first event from the inference host",
+    )
     return parser
 
 
@@ -413,6 +840,35 @@ def select_runner(backend):
             "BANERA PyTorch environment"
         )
     return runner_cls
+
+
+def build_local_manager(args, acquisition_controller):
+    from run_manager import RunManager
+
+    return RunManager(
+        runner_cls=select_runner(args.backend),
+        model_path=args.model,
+        number_of_cycles=args.number_of_cycles,
+        sleep_time=args.sleep_time,
+        backend=args.backend,
+        inferences_per_cycle=args.inferences_per_cycle,
+        target_burst_seconds=args.target_burst_seconds,
+        sampling_rate_hz=args.sampling_rate_hz,
+        min_active_samples=args.min_active_samples,
+        warmup_inferences=args.warmup_inferences,
+        warmup_seconds=args.warmup_seconds,
+        warmup_cooldown_seconds=args.warmup_cooldown_seconds,
+        calibration_initial_inferences=args.calibration_initial_inferences,
+        calibration_target_seconds=args.calibration_target_seconds,
+        calibration_repetitions=args.calibration_repetitions,
+        max_relative_mad=args.max_relative_mad,
+        max_calibration_inferences=args.max_calibration_inferences,
+        leading_idle_seconds=args.leading_idle_seconds,
+        trailing_idle_seconds=args.trailing_idle_seconds,
+        safety_margin_seconds=args.safety_margin_seconds,
+        acquisition_controller=acquisition_controller,
+        manifest_directory=args.output_directory,
+    )
 
 
 def build_result_report(
@@ -473,6 +929,8 @@ def main():
     command_started = time.monotonic()
     command_started_at_utc = datetime.now(timezone.utc).isoformat()
     manager = None
+    remote_controller = None
+    manifest = None
 
     try:
         controller = Ina226ProcessController(
@@ -487,35 +945,35 @@ def main():
             startup_timeout_seconds=args.acquisition_startup_timeout_s,
             stop_timeout_seconds=args.acquisition_stop_timeout_s,
         )
-        manager = RunManager(
-            runner_cls=select_runner(args.backend),
-            model_path=args.model,
-            number_of_cycles=args.number_of_cycles,
-            sleep_time=args.sleep_time,
-            backend=args.backend,
-            inferences_per_cycle=args.inferences_per_cycle,
-            target_burst_seconds=args.target_burst_seconds,
-            sampling_rate_hz=args.sampling_rate_hz,
-            min_active_samples=args.min_active_samples,
-            warmup_inferences=args.warmup_inferences,
-            warmup_seconds=args.warmup_seconds,
-            warmup_cooldown_seconds=args.warmup_cooldown_seconds,
-            calibration_initial_inferences=args.calibration_initial_inferences,
-            calibration_target_seconds=args.calibration_target_seconds,
-            calibration_repetitions=args.calibration_repetitions,
-            max_relative_mad=args.max_relative_mad,
-            max_calibration_inferences=args.max_calibration_inferences,
-            leading_idle_seconds=args.leading_idle_seconds,
-            trailing_idle_seconds=args.trailing_idle_seconds,
-            safety_margin_seconds=args.safety_margin_seconds,
-            acquisition_controller=controller,
-            manifest_directory=args.output_directory,
-        )
-        manifest = manager.execute()
+        if args.runner_host is not None:
+            remote_controller = SshExperimentController(
+                runner_host=args.runner_host,
+                remote_directory=args.remote_directory,
+                remote_python=args.remote_python,
+                remote_manifest_directory=args.remote_manifest_directory,
+                ssh_options=args.ssh_option,
+                acquisition_controller=controller,
+                startup_timeout_seconds=args.remote_startup_timeout_s,
+            )
+            manifest = remote_controller.execute(args)
+            prepare_remote_manifest(manifest, args)
+        else:
+            manager = build_local_manager(args, controller)
+            manifest = manager.execute()
     except KeyboardInterrupt as error:
         exit_code = 130
+        manifest = (
+            manager.last_manifest
+            if manager is not None
+            else None if remote_controller is None else remote_controller.manifest
+        )
+        if args.runner_host is not None and manifest is not None:
+            try:
+                prepare_remote_manifest(manifest, args)
+            except OSError:
+                pass
         report = build_result_report(
-            None if manager is None else manager.last_manifest,
+            manifest,
             args.output_directory,
             time.monotonic() - command_started,
             exit_code,
@@ -524,8 +982,18 @@ def main():
         )
     except Exception as error:
         exit_code = 1
+        manifest = (
+            manager.last_manifest
+            if manager is not None
+            else None if remote_controller is None else remote_controller.manifest
+        )
+        if args.runner_host is not None and manifest is not None:
+            try:
+                prepare_remote_manifest(manifest, args)
+            except OSError:
+                pass
         report = build_result_report(
-            None if manager is None else manager.last_manifest,
+            manifest,
             args.output_directory,
             time.monotonic() - command_started,
             exit_code,

@@ -102,28 +102,39 @@ A fixed campaign rate keeps filter configuration and measurements comparable. Dy
 
 ## 6. Automated acquisition sequence
 
-Use `automated_measurement.py` for one experiment with no interaction after the
-command starts.
+Use `automated_measurement.py` on the PC physically connected to the TI-SCB.
+The inference host is selected with `--runner-host` and reached through
+non-interactive SSH. No interaction is required after the command starts.
 
-1. Create the runner and load or build the selected model.
-2. Execute warm-up, cooldown, and calibration while acquisition is stopped.
-3. Select `inferences_per_cycle` from the stable calibration result.
-4. Write the manifest in `READY` state and emit `READY`.
-5. Launch `ina226_serial_logger.py` as an isolated child process.
-6. Configure and verify the INA226 calibration register, create the CSV, and
-  flush the first complete sample.
-7. After the child emits `ACQUISITION_READY`, begin `leading_idle_seconds`.
-8. Execute measured cycles with idle intervals only between cycles.
-9. Record `trailing_idle_seconds`, then an additional idle
+1. The PC opens an SSH process running `run_manager.py --stdio_acquisition` on
+  the Jetson.
+2. The Jetson creates the runner and loads or builds the selected model.
+3. The Jetson executes warm-up, cooldown, and calibration while acquisition is
+   stopped.
+4. The Jetson selects `inferences_per_cycle`, writes its manifest in `READY`
+   state, and emits `READY` followed by `ACQUISITION_START_REQUEST`.
+5. The PC launches its local `ina226_serial_logger.py` child process.
+6. The PC configures and verifies the INA226 calibration register, creates the
+  CSV, flushes the first complete sample, and acknowledges the Jetson.
+7. Only after that acknowledgement does the Jetson begin
+  `leading_idle_seconds`.
+8. The Jetson executes measured cycles with idle intervals only between cycles.
+9. The Jetson records `trailing_idle_seconds`, then an additional idle
   `safety_margin_seconds`.
-10. Request cooperative logger shutdown and wait for CSV and serial-port cleanup.
-11. Only after the logger exits, write the final manifest and print the final
+10. The Jetson emits `ACQUISITION_STOP_REQUEST` and waits. The PC requests
+   cooperative logger shutdown and waits for CSV and serial-port cleanup.
+11. The PC acknowledges the stopped logger. Only then does the Jetson write its
+   final manifest and send it through SSH.
+12. The PC saves that manifest beside the CSV and prints the final
    `AUTOMATED_MEASUREMENT_RESULT` JSON record.
 
 ```bash
 python automated_measurement.py \
-  --backend cpu \
-  --model measurements/Data/Linear/Linear_8192_8192.pt \
+  --runner-host [ssh destination] \
+  --remote-directory /home/jetson \
+  --remote-manifest-directory measurements_jetson \
+  --backend cuda \
+  --model Models/CPU/Linear/Linear_8192_8192.pt \
   --port /dev/serial/by-id/usb-Texas_Instruments_Generic_Bulk_Device_12345678-if01 \
   --output-directory measurements/runs \
   --shunt-ohms 0.012 \
@@ -135,6 +146,13 @@ The automated command derives `interval_ms = 1000 / sampling_rate_hz`; planning
 and acquisition therefore cannot silently use different requested rates. The
 observed rate and deadline misses are recorded separately because serial and
 sensor timing can prevent the requested rate from being achieved.
+
+The Jetson needs `run_manager.py`, `runner.py`, and `base_runner.py`. The PC
+needs `automated_measurement.py` and `ina226_serial_logger.py`. The TI serial
+device path and local output directory are PC paths; the model, remote working
+directory, and remote manifest directory are Jetson paths. SSH must be
+non-interactive; use repeatable `--ssh-option` arguments for options such as a
+`ProxyJump`.
 
 ### Manual fallback
 
@@ -269,9 +287,9 @@ the burst timer, while the complete sequence of forward passes is included.
 
 ## 10. Current limitations
 
-- Event timestamps and CSV timestamps are generated on the same host but are not
-  injected into each other's rows. Pairing uses the exact campaign-ID stem and
-  manifest path instead.
+- Event timestamps are generated on the Jetson while CSV timestamps are
+  generated on the PC. They are not assumed to share a monotonic clock; pairing
+  uses the exact campaign-ID stem and explicit SSH handshakes instead.
 - CSV processing uses `plan.inferences_per_cycle`, but active-region detection
   remains threshold-based rather than event-indexed.
 - Direct acquisition does not automatically segment CSV rows by burst event;

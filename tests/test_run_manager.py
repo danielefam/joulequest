@@ -4,10 +4,14 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
+import run_manager as run_manager_module
 from base_runner import BurstResult
 from run_manager import (
     RunManager,
+    StdioAcquisitionController,
     calculate_capture_plan,
     calculate_inference_count,
     calculate_required_burst_seconds,
@@ -156,6 +160,106 @@ class PlanningTests(unittest.TestCase):
         )
         self.assertEqual(plan.capture_seconds, 26.0)
         self.assertEqual(plan.capture_samples, 260)
+
+
+class StdioAcquisitionControllerTests(unittest.TestCase):
+    def test_json_handshake_uses_campaign_id_and_preserves_results(self):
+        input_stream = io.StringIO(
+            json.dumps(
+                {
+                    "command": "ACQUISITION_STARTED",
+                    "campaign_id": "campaign-123",
+                    "result": {"status": "RUNNING", "sample_count": 1},
+                }
+            )
+            + "\n"
+            + json.dumps(
+                {
+                    "command": "ACQUISITION_STOPPED",
+                    "campaign_id": "campaign-123",
+                    "result": {"status": "COMPLETE", "sample_count": 20},
+                }
+            )
+            + "\n"
+        )
+        output_stream = io.StringIO()
+        controller = StdioAcquisitionController(input_stream, output_stream)
+
+        description = controller.describe(
+            "campaign-123",
+            {"sampling_rate_hz": 10.0},
+        )
+        started = controller.start()
+        stopped = controller.stop()
+
+        self.assertEqual(description["control_protocol"], "stdio_json_v1")
+        self.assertEqual(started["status"], "RUNNING")
+        self.assertEqual(stopped["sample_count"], 20)
+        events = [
+            json.loads(line)["event"]
+            for line in output_stream.getvalue().splitlines()
+        ]
+        self.assertEqual(
+            events,
+            ["ACQUISITION_START_REQUEST", "ACQUISITION_STOP_REQUEST"],
+        )
+
+    def test_cli_emits_complete_manifest_for_ssh_client(self):
+        manifest = {
+            "campaign_id": "campaign-123",
+            "status": "COMPLETE",
+        }
+        manager = Mock()
+        manager.execute.return_value = manifest
+        manager.last_manifest = manifest
+        args = SimpleNamespace(
+            backend="cpu",
+            model="Linear_64_64.pt",
+            number_of_cycles=1,
+            sleep_time=0.0,
+            inferences_per_cycle=None,
+            target_burst_seconds=1.0,
+            sampling_rate_hz=10.0,
+            min_active_samples=10,
+            warmup_inferences=1,
+            warmup_seconds=0.0,
+            warmup_cooldown_seconds=0.0,
+            calibration_initial_inferences=1,
+            calibration_target_seconds=0.1,
+            calibration_repetitions=2,
+            max_relative_mad=0.15,
+            max_calibration_inferences=1000,
+            leading_idle_seconds=0.0,
+            trailing_idle_seconds=0.0,
+            safety_margin_seconds=0.0,
+            wait_for_acquisition=False,
+            stdio_acquisition=True,
+            manifest_directory="measurements_jetson",
+        )
+        parser = Mock()
+        parser.parse_args.return_value = args
+        runner_module = SimpleNamespace(TorchRunner=object)
+        output = io.StringIO()
+
+        with (
+            patch.object(
+                run_manager_module,
+                "build_argument_parser",
+                return_value=parser,
+            ),
+            patch.object(
+                run_manager_module,
+                "RunManager",
+                return_value=manager,
+            ),
+            patch.dict("sys.modules", {"runner": runner_module}),
+            redirect_stdout(output),
+        ):
+            run_manager_module.main()
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["event"], "RUN_MANIFEST")
+        self.assertEqual(payload["manifest"], manifest)
 
 
 class RunManagerTests(unittest.TestCase):
