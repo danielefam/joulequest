@@ -40,6 +40,8 @@ class CalibrationResult:
     discarded_batches: int
     sizing_pilot_inferences: int
     total_executed_inferences: int
+    relative_mad: float
+    coefficient_of_variation: float
 
 
 def calculate_required_burst_seconds(target_burst_seconds, min_active_samples, sampling_rate_hz):
@@ -108,11 +110,13 @@ class RunManager:
         calibration_initial_inferences=10,
         calibration_target_seconds=0.5,
         calibration_repetitions=5,
+        max_relative_mad=0.15,
         max_calibration_inferences=1_000_000,
         leading_idle_seconds=5.0,
         trailing_idle_seconds=5.0,
         safety_margin_seconds=2.0,
         wait_for_acquisition=False,
+        acquisition_controller=None,
         manifest_directory=None,
         sleep_fn=time.sleep,
         input_fn=input,
@@ -136,26 +140,35 @@ class RunManager:
         self.calibration_initial_inferences = calibration_initial_inferences
         self.calibration_target_seconds = calibration_target_seconds
         self.calibration_repetitions = calibration_repetitions
+        self.max_relative_mad = max_relative_mad
         self.max_calibration_inferences = max_calibration_inferences
         self.leading_idle_seconds = leading_idle_seconds
         self.trailing_idle_seconds = trailing_idle_seconds
         self.safety_margin_seconds = safety_margin_seconds
         self.wait_for_acquisition = wait_for_acquisition
+        self.acquisition_controller = acquisition_controller
         self.manifest_directory = manifest_directory
         self.sleep_fn = sleep_fn
         self.input_fn = input_fn
+        self.last_manifest = None
         
         if self.calibration_repetitions < 2:
             raise ValueError(
                 "calibration_repetitions must include one discarded and "
                 "at least one retained batch"
             )
+        if self.max_relative_mad < 0:
+            raise ValueError("max_relative_mad cannot be negative")
+        if self.wait_for_acquisition and self.acquisition_controller is not None:
+            raise ValueError(
+                "wait_for_acquisition cannot be combined with automated acquisition"
+            )
 
     @staticmethod
     def _utc_now():
         return datetime.now(timezone.utc).isoformat()
 
-    def _emit_event(self, event, verbose=False, **fields):
+    def _emit_event(self, event, verbose=True, **fields):
         payload = {
             "event": event,
             "monotonic_seconds": time.monotonic(),
@@ -217,6 +230,23 @@ class RunManager:
         latencies = [result.latency_seconds for result in retained] 
         stable_latency = statistics.median(latencies)
         median_batch =statistics.median(result.elapsed_seconds for result in retained)
+        median_absolute_deviation = statistics.median(
+            abs(latency - stable_latency) for latency in latencies
+        )
+        relative_mad = median_absolute_deviation / stable_latency
+        coefficient_of_variation = (
+            statistics.pstdev(latencies) / statistics.mean(latencies)
+        )
+        if (
+            relative_mad > self.max_relative_mad
+            or coefficient_of_variation > self.max_relative_mad
+        ):
+            raise RuntimeError(
+                "Calibration did not stabilize: "
+                f"relative MAD={relative_mad:.6g}, "
+                f"coefficient of variation={coefficient_of_variation:.6g}, "
+                f"limit={self.max_relative_mad:.6g}"
+            )
 
         return CalibrationResult(
             stable_latency_seconds=stable_latency,
@@ -228,7 +258,9 @@ class RunManager:
             total_executed_inferences=(
                 pilot.executed_inferences
                 + sum(result.executed_inferences for result in batches)
-            )
+            ),
+            relative_mad=relative_mad,
+            coefficient_of_variation=coefficient_of_variation,
         )
 
     def _select_inference_count(self, calibration):
@@ -388,13 +420,11 @@ class RunManager:
             "end_event": end_event,
         }
 
-    def _run_measurement(self, runner, campaign_id, plan):
+    def _run_measurement(self, runner, campaign_id, plan, manifest):
         """Execute measured cycles with leading/trailing idle guards."""
-        measurement = {
-            "cycles": [],
-            "total_executed_inferences": 0,
-        }
+        measurement = manifest["measurement"]
         self.sleep_fn(self.leading_idle_seconds)
+        self._check_acquisition_health(manifest)
 
         for cycle in range(1, self.number_of_cycles + 1):
             cycle_record = self._run_measured_cycle(
@@ -408,13 +438,73 @@ class RunManager:
             measurement["total_executed_inferences"] += (
                 cycle_record["executed_inferences"]
             )
+            self._check_acquisition_health(manifest)
 
             # There is no idle interval after the final measured cycle.
             if cycle < self.number_of_cycles:
                 self.sleep_fn(self.sleep_time)
+                self._check_acquisition_health(manifest)
 
         self.sleep_fn(self.trailing_idle_seconds)
+        self._check_acquisition_health(manifest)
         return measurement
+
+    def _describe_acquisition(self, campaign_id, plan):
+        description = self.acquisition_controller.describe(campaign_id, plan)
+        if not isinstance(description, dict):
+            raise TypeError("acquisition describe() must return a dictionary")
+        return {"status": "PENDING", **description}
+
+    def _merge_acquisition_result(self, manifest, result):
+        if result is None:
+            return
+        if not isinstance(result, dict):
+            raise TypeError("acquisition lifecycle methods must return dictionaries")
+        acquisition = manifest.setdefault("acquisition", {})
+        previous_status = acquisition.get("status")
+        previous_failure = acquisition.get("failure")
+        acquisition.update(result)
+        if previous_status == "FAILED":
+            acquisition["status"] = previous_status
+            acquisition["failure"] = previous_failure
+
+    def _mark_acquisition_failed(self, manifest, error):
+        acquisition = manifest.setdefault("acquisition", {})
+        acquisition["status"] = "FAILED"
+        acquisition.setdefault("failed_at_utc", self._utc_now())
+        acquisition.setdefault(
+            "failure",
+            {
+                "type": type(error).__name__,
+                "message": str(error),
+            },
+        )
+
+    def _start_acquisition(self, manifest):
+        try:
+            result = self.acquisition_controller.start()
+            self._merge_acquisition_result(manifest, result)
+        except Exception as error:
+            self._mark_acquisition_failed(manifest, error)
+
+    def _check_acquisition_health(self, manifest):
+        if (
+            self.acquisition_controller is None
+            or manifest["acquisition"].get("status") == "FAILED"
+        ):
+            return
+        try:
+            result = self.acquisition_controller.check_health()
+            self._merge_acquisition_result(manifest, result)
+        except Exception as error:
+            self._mark_acquisition_failed(manifest, error)
+
+    def _stop_acquisition(self, manifest):
+        try:
+            result = self.acquisition_controller.stop()
+            self._merge_acquisition_result(manifest, result)
+        except Exception as error:
+            self._mark_acquisition_failed(manifest, error)
 
     def _complete_manifest(self, manifest, manifest_path, campaign_id):
         """Add quality status, persist the final manifest, and emit COMPLETE."""
@@ -423,6 +513,8 @@ class RunManager:
             for cycle in manifest["measurement"]["cycles"]
             for flag in cycle["quality_flags"]
         ]
+        if manifest.get("acquisition", {}).get("status") == "FAILED":
+            all_flags.append("ACQUISITION_FAILED")
         manifest["quality_status"] = "OK" if not all_flags else "REVIEW"
         manifest["quality_flags"] = sorted(set(all_flags))
         manifest["status"] = "COMPLETE"
@@ -447,36 +539,61 @@ class RunManager:
             "status": "STARTING",
             "created_at_utc": self._utc_now(),
             "model_path": self.model_path,
-            "backend": self.backend
+            "backend": self.backend,
+            "workload_policy": {
+                "parameters": (
+                    "fixed_model" if self.backend == "tpu" else "fresh_per_burst"
+                ),
+                "input": "fresh_per_burst",
+            },
         }
+        self.last_manifest = manifest
         runner = None
+        acquisition_stopped = False
 
         try:
             runner = self.runner_cls(self.model_path, self.backend)
             runner.prepare()
 
             plan = self._prepare_acquisition(runner, campaign_id, manifest)
+            if self.acquisition_controller is not None:
+                manifest["acquisition"] = self._describe_acquisition(
+                    campaign_id,
+                    plan,
+                )
             self._write_manifest(manifest, manifest_path)
             self._emit_event("READY", campaign_id=campaign_id, **plan)
 
-            if self.wait_for_acquisition:
+            if self.acquisition_controller is not None:
+                self._start_acquisition(manifest)
+            elif self.wait_for_acquisition:
                 self.input_fn("Start INA226 acquisition, then press Enter to begin the leading idle interval...")
 
-            manifest["measurement"] = self._run_measurement(
+            manifest["measurement"] = {
+                "cycles": [],
+                "total_executed_inferences": 0,
+            }
+            self._run_measurement(
                 runner,
                 campaign_id,
                 plan,
+                manifest,
             )
 
-            if self.wait_for_acquisition:
+            if self.acquisition_controller is not None:
+                self.sleep_fn(self.safety_margin_seconds)
+                self._check_acquisition_health(manifest)
+                self._stop_acquisition(manifest)
+                acquisition_stopped = True
+            elif self.wait_for_acquisition:
                 self.input_fn("Stop INA226 acquisition, then press Enter to write the manifest...")
-            else:
-                time_to_stop_measurements = 5
-                time.sleep(time_to_stop_measurements)
             self._complete_manifest(manifest, manifest_path, campaign_id)
             return manifest
 
-        except Exception as error:
+        except (Exception, KeyboardInterrupt) as error:
+            if self.acquisition_controller is not None and not acquisition_stopped:
+                self._stop_acquisition(manifest)
+                acquisition_stopped = True
             manifest["status"] = "FAILED"
             manifest["failed_at_utc"] = self._utc_now()
             manifest["failure"] = {
@@ -493,6 +610,8 @@ class RunManager:
             )
             raise
         finally:
+            if self.acquisition_controller is not None and not acquisition_stopped:
+                self._stop_acquisition(manifest)
             if runner is not None:
                 runner.close()
 
@@ -516,6 +635,7 @@ def build_argument_parser():
     parser.add_argument("--calibration_initial_inferences", type=int, default=10)
     parser.add_argument("--calibration_target_seconds", type=float, default=0.5)
     parser.add_argument("--calibration_repetitions", type=int, default=5, help="at least 2 because the first one in discarded")
+    parser.add_argument("--max_relative_mad", type=float, default=0.15, help="maximum accepted relative MAD and coefficient of variation")
     parser.add_argument("--max_calibration_inferences", type=int, default=1000000)
     parser.add_argument("--leading_idle_seconds", type=float, default=5.0)
     parser.add_argument("--trailing_idle_seconds", type=float, default=5.0)
@@ -551,6 +671,7 @@ def main():
         calibration_initial_inferences=args.calibration_initial_inferences,
         calibration_target_seconds=args.calibration_target_seconds,
         calibration_repetitions=args.calibration_repetitions,
+        max_relative_mad=args.max_relative_mad,
         max_calibration_inferences=args.max_calibration_inferences,
         leading_idle_seconds=args.leading_idle_seconds,
         trailing_idle_seconds=args.trailing_idle_seconds,

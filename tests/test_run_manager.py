@@ -1,6 +1,8 @@
+import io
 import json
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 
 from base_runner import BurstResult
@@ -80,6 +82,50 @@ class UnstableFakeRunner(FakeRunner):
             executed_inferences=inference_count,
             elapsed_seconds=inference_count * 0.01 * multiplier,
         )
+
+
+class FailingMeasuredRunner(FakeRunner):
+    def __init__(self, model_path, device):
+        super().__init__(model_path, device)
+        self.measured_calls = 0
+
+    def run_prepared_burst(self, inference_count):
+        self.measured_calls += 1
+        if self.measured_calls == 2:
+            raise RuntimeError("measured workload failed")
+        return super().run_prepared_burst(inference_count)
+
+
+class FakeAcquisitionController:
+    def __init__(self, timeline, start_error=None):
+        self.timeline = timeline
+        self.start_error = start_error
+        self.active = False
+        self.stop_calls = 0
+
+    def describe(self, campaign_id, plan):
+        self.timeline.append(("describe", campaign_id))
+        return {
+            "csv_path": f"/tmp/{campaign_id}.csv",
+            "sampling_rate_hz": plan["sampling_rate_hz"],
+        }
+
+    def start(self):
+        self.timeline.append(("start", None))
+        if self.start_error is not None:
+            raise self.start_error
+        self.active = True
+        return {"status": "RUNNING", "sample_count": 1}
+
+    def check_health(self):
+        self.timeline.append(("health", None))
+        return None
+
+    def stop(self):
+        self.timeline.append(("stop", None))
+        self.stop_calls += 1
+        self.active = False
+        return {"status": "COMPLETE", "sample_count": 20}
 
 
 class PlanningTests(unittest.TestCase):
@@ -195,6 +241,126 @@ class RunManagerTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(RuntimeError, "did not stabilize"):
                 manager.execute()
+
+    def test_all_lifecycle_events_are_emitted_in_order(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = io.StringIO()
+            manager = self._manager(temp_dir, number_of_cycles=1)
+
+            with redirect_stdout(output):
+                manager.execute()
+
+            events = [
+                json.loads(line)["event"]
+                for line in output.getvalue().splitlines()
+            ]
+            self.assertEqual(
+                events,
+                [
+                    "WARMUP_START",
+                    "WARMUP_END",
+                    "CALIBRATION_START",
+                    "CALIBRATION_END",
+                    "READY",
+                    "BURST_START",
+                    "BURST_END",
+                    "COMPLETE",
+                ],
+            )
+
+    def test_automated_acquisition_wraps_only_the_capture_window(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            timeline = []
+            controller = FakeAcquisitionController(timeline)
+            manager = self._manager(
+                temp_dir,
+                acquisition_controller=controller,
+                warmup_cooldown_seconds=5.0,
+                leading_idle_seconds=1.0,
+                sleep_time=4.0,
+                trailing_idle_seconds=2.0,
+                safety_margin_seconds=3.0,
+                sleep_fn=lambda seconds: timeline.append(("sleep", seconds)),
+            )
+            write_manifest = manager._write_manifest
+
+            def record_write(manifest, path):
+                self.assertFalse(controller.active)
+                timeline.append(("write", manifest["status"]))
+                write_manifest(manifest, path)
+
+            manager._write_manifest = record_write
+            manifest = manager.execute()
+
+            self.assertEqual(manifest["acquisition"]["status"], "COMPLETE")
+            self.assertEqual(manifest["quality_status"], "OK")
+            self.assertEqual(controller.stop_calls, 1)
+            ready_write = timeline.index(("write", "READY"))
+            start = timeline.index(("start", None))
+            leading_idle = timeline.index(("sleep", 1.0))
+            trailing_idle = timeline.index(("sleep", 2.0))
+            safety_margin = timeline.index(("sleep", 3.0))
+            stop = timeline.index(("stop", None))
+            complete_write = timeline.index(("write", "COMPLETE"))
+            self.assertLess(ready_write, start)
+            self.assertLess(start, leading_idle)
+            self.assertLess(leading_idle, trailing_idle)
+            self.assertLess(trailing_idle, safety_margin)
+            self.assertLess(safety_margin, stop)
+            self.assertLess(stop, complete_write)
+
+    def test_acquisition_start_failure_completes_workload_for_review(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            timeline = []
+            controller = FakeAcquisitionController(
+                timeline,
+                start_error=RuntimeError("serial board unavailable"),
+            )
+            manifest = self._manager(
+                temp_dir,
+                acquisition_controller=controller,
+            ).execute()
+
+            self.assertEqual(manifest["status"], "COMPLETE")
+            self.assertEqual(manifest["quality_status"], "REVIEW")
+            self.assertIn("ACQUISITION_FAILED", manifest["quality_flags"])
+            self.assertEqual(manifest["acquisition"]["status"], "FAILED")
+            self.assertEqual(
+                manifest["measurement"]["total_executed_inferences"],
+                200,
+            )
+            self.assertEqual(controller.stop_calls, 1)
+
+    def test_workload_failure_stops_acquisition_before_failed_manifest(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            timeline = []
+            controller = FakeAcquisitionController(timeline)
+            manager = self._manager(
+                temp_dir,
+                runner_cls=FailingMeasuredRunner,
+                acquisition_controller=controller,
+            )
+            write_manifest = manager._write_manifest
+
+            def record_write(manifest, path):
+                self.assertFalse(controller.active)
+                timeline.append(("write", manifest["status"]))
+                write_manifest(manifest, path)
+
+            manager._write_manifest = record_write
+
+            with self.assertRaisesRegex(RuntimeError, "measured workload failed"):
+                manager.execute()
+
+            manifest_path = next(Path(temp_dir).glob("*.json"))
+            persisted = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(persisted["status"], "FAILED")
+            self.assertEqual(len(persisted["measurement"]["cycles"]), 1)
+            self.assertEqual(controller.stop_calls, 1)
+            self.assertLess(
+                timeline.index(("stop", None)),
+                timeline.index(("write", "FAILED")),
+            )
 
 
 if __name__ == "__main__":
