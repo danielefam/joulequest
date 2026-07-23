@@ -10,3 +10,4 @@ measurements/
 measurements_jetson
 docs_new/*
 !docs_new/adaptive_burst_measurement.md
+!docs_new/cli_acquisition_report.md
