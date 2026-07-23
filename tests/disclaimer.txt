@@ -1,0 +1,1 @@
+The contents of the “tests” folder are generated entirely by LLM (GPT-5.6-luna) and have not been verified or updated with the code.

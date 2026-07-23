@@ -6,7 +6,6 @@ new_measures/
 docs_new/papers
 Plot
 linear_power_report.*
-tests
 measurements/
 measurements_jetson
 docs_new/*
