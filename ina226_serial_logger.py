@@ -24,6 +24,17 @@ SHUNT_VOLTAGE_FULL_SCALE_V = 0.08192
 CURRENT_REGISTER_STEPS = 1 << 15
 CALIBRATION_CONSTANT = 0.00512
 MAX_CALIBRATION_VALUE = 0xFFFF
+CONVERSION_TIMES_SECONDS = (
+    140e-6,
+    204e-6,
+    332e-6,
+    588e-6,
+    1.1e-3,
+    2.116e-3,
+    4.156e-3,
+    8.244e-3,
+)
+AVERAGING_COUNTS = (1, 4, 16, 64, 128, 256, 512, 1024)
 
 
 class ProtocolError(RuntimeError):
@@ -37,6 +48,18 @@ def int_auto(value: str) -> int:
 def signed_16(value: int) -> int:
     value &= 0xFFFF
     return value - 0x10000 if value & 0x8000 else value
+
+
+def conversion_cycle_seconds(configuration: int) -> float | None:
+    mode = configuration & 0x07
+    conversion_seconds = 0.0
+    if mode & 0x01:
+        conversion_seconds += CONVERSION_TIMES_SECONDS[(configuration >> 3) & 0x07]
+    if mode & 0x02:
+        conversion_seconds += CONVERSION_TIMES_SECONDS[(configuration >> 6) & 0x07]
+    if conversion_seconds == 0:
+        return None
+    return conversion_seconds * AVERAGING_COUNTS[(configuration >> 9) & 0x07]
 
 
 def calculate_calibration(max_expected_current_a: float, shunt_ohms: float) -> int:
@@ -248,6 +271,7 @@ def run(args: argparse.Namespace) -> int:
     try:
         device.set_device(args.address)
         configuration_raw = device.read_register(0x00)
+        conversion_cycle_s = conversion_cycle_seconds(configuration_raw)
         requested_calibration = calculate_calibration(
             args.max_expected_current_a, args.shunt_ohms
         )
@@ -262,14 +286,51 @@ def run(args: argparse.Namespace) -> int:
         current_lsb_a = CALIBRATION_CONSTANT / (
             calibration_raw * args.shunt_ohms
         )
+        conversion_cycle_text = (
+            "inactive"
+            if conversion_cycle_s is None
+            else f"{conversion_cycle_s * 1000:.6g} ms"
+        )
         print(
             f"TI-SCB {port}; INA226 address=0x{args.address:02x}; "
             f"configuration=0x{configuration_raw:04x}; "
+            f"conversion-cycle={conversion_cycle_text}; "
             f"max-current={args.max_expected_current_a:.12g} A; "
             f"calibration=0x{calibration_raw:04x}; "
             f"current-lsb={current_lsb_a:.12g} A; output={args.output}",
             file=sys.stderr,
         )
+        operating_mode = configuration_raw & 0x07
+        if operating_mode in (0, 4):
+            print(
+                "warning: INA226 configuration is in a power-down mode; "
+                "result registers will not update continuously",
+                file=sys.stderr,
+            )
+        elif operating_mode in (1, 2, 3):
+            print(
+                "warning: INA226 configuration is in a triggered mode; repeated "
+                "reads return the same conversion unless the device is retriggered",
+                file=sys.stderr,
+            )
+        else:
+            if operating_mode in (5, 6):
+                print(
+                    "warning: INA226 configuration does not continuously convert "
+                    "both shunt and bus voltage; some logged columns will be stale",
+                    file=sys.stderr,
+                )
+            if (
+                conversion_cycle_s is not None
+                and args.interval_ms < conversion_cycle_s * 1000
+            ):
+                print(
+                    f"warning: requested interval {args.interval_ms:.6g} ms is "
+                    f"shorter than the configured INA226 conversion cycle "
+                    f"({conversion_cycle_s * 1000:.6g} ms, approximately "
+                    f"{1 / conversion_cycle_s:.6g} fresh samples/s)",
+                    file=sys.stderr,
+                )
 
         with args.output.open(output_mode, newline="", encoding="utf-8", buffering=1) as output:
             writer = csv.DictWriter(output, fieldnames=fieldnames)
@@ -277,6 +338,9 @@ def run(args: argparse.Namespace) -> int:
             started = time.monotonic()
             next_deadline = started
             sample = 0
+            first_sample_elapsed_s: float | None = None
+            last_sample_elapsed_s: float | None = None
+            deadline_misses = 0
 
             while True:
                 if args.samples and sample >= args.samples:
@@ -290,6 +354,9 @@ def run(args: argparse.Namespace) -> int:
                 current_raw = device.read_register(0x04)
                 timestamp = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
                 elapsed_seconds = time.monotonic() - started
+                if first_sample_elapsed_s is None:
+                    first_sample_elapsed_s = elapsed_seconds
+                last_sample_elapsed_s = elapsed_seconds
 
                 shunt_voltage_v = signed_16(shunt_raw) * SHUNT_VOLTAGE_LSB_V
                 bus_voltage_v = bus_raw * BUS_VOLTAGE_LSB_V
@@ -332,9 +399,30 @@ def run(args: argparse.Namespace) -> int:
                 if remaining > 0:
                     time.sleep(remaining)
                 else:
+                    deadline_misses += 1
+                    if deadline_misses == 1:
+                        print(
+                            "warning: the sampling loop passed the next requested "
+                            "deadline; the logger reset it instead of building a "
+                            "backlog",
+                            file=sys.stderr,
+                        )
                     next_deadline = time.monotonic()
 
-        print(f"Captured {sample} samples to {args.output}", file=sys.stderr)
+        rate_text = "n/a"
+        if (
+            sample > 1
+            and first_sample_elapsed_s is not None
+            and last_sample_elapsed_s is not None
+        ):
+            elapsed_span_s = last_sample_elapsed_s - first_sample_elapsed_s
+            if elapsed_span_s > 0:
+                rate_text = f"{(sample - 1) / elapsed_span_s:.6g} samples/s"
+        print(
+            f"Captured {sample} samples to {args.output}; achieved-rate={rate_text}; "
+            f"deadline-misses={deadline_misses}",
+            file=sys.stderr,
+        )
         return 0
     finally:
         device.close()
