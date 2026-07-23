@@ -6,8 +6,13 @@ from scipy.signal import butter, filtfilt
 from skimage.filters import threshold_otsu
 import argparse
 import numpy as np
-import json, os
+import json
 from pathlib import Path
+
+try:
+    from .artifact_paths import get_manifest_file_path
+except ImportError:
+    from artifact_paths import get_manifest_file_path
 
 
 def load_data(csv_path):
@@ -268,15 +273,6 @@ def get_average_power(df,inferences_per_cycle, kernel_size=11, fs=100, cutoff=0.
 
     return results
 
-def get_manifest_file_path(measurements_manifest_dir_path, csv_path):
-    for _, _, files in os.walk(measurements_manifest_dir_path):
-        for file in files:
-            if os.path.basename(os.path.basename(csv_path).split('.')[0]) in file :
-                manifest_file_path = file
-                return Path(measurements_manifest_dir_path) / manifest_file_path
-    
-    
-    
 def main():
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)

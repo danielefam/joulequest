@@ -1,6 +1,6 @@
 # Adaptive Clean-Burst Measurement Protocol
 
-**Implementation status:** first runner-side implementation, 2026-07-12
+**Implementation status:** automated direct-serial acquisition, 2026-07-23
 **Validated priority:** PyTorch CPU/CUDA
 **Compatibility only:** Edge TPU remains available but is not part of the current validation campaign.
 
@@ -100,7 +100,43 @@ Preferred policy:
 
 A fixed campaign rate keeps filter configuration and measurements comparable. Dynamic sampling rates should be introduced only if bench validation proves that no single fixed rate supports both the fastest and slowest workloads.
 
-## 6. Manual acquisition sequence
+## 6. Automated acquisition sequence
+
+Use `automated_measurement.py` for one experiment with no interaction after the
+command starts.
+
+1. Create the runner and load or build the selected model.
+2. Execute warm-up, cooldown, and calibration while acquisition is stopped.
+3. Select `inferences_per_cycle` from the stable calibration result.
+4. Write the manifest in `READY` state and emit `READY`.
+5. Launch `ina226_serial_logger.py` as an isolated child process.
+6. Configure and verify the INA226 calibration register, create the CSV, and
+  flush the first complete sample.
+7. After the child emits `ACQUISITION_READY`, begin `leading_idle_seconds`.
+8. Execute measured cycles with idle intervals only between cycles.
+9. Record `trailing_idle_seconds`, then an additional idle
+  `safety_margin_seconds`.
+10. Request cooperative logger shutdown and wait for CSV and serial-port cleanup.
+11. Only after the logger exits, write the final manifest and print the final
+   `AUTOMATED_MEASUREMENT_RESULT` JSON record.
+
+```bash
+python automated_measurement.py \
+  --backend cpu \
+  --model measurements/Data/Linear/Linear_8192_8192.pt \
+  --port /dev/serial/by-id/usb-Texas_Instruments_Generic_Bulk_Device_12345678-if01 \
+  --output-directory measurements/runs \
+  --shunt-ohms 0.012 \
+  --max-expected-current-a 5.0 \
+  --sampling_rate_hz 10
+```
+
+The automated command derives `interval_ms = 1000 / sampling_rate_hz`; planning
+and acquisition therefore cannot silently use different requested rates. The
+observed rate and deadline misses are recorded separately because serial and
+sensor timing can prevent the requested rate from being achieved.
+
+### Manual fallback
 
 Use `--wait_for_acquisition` while acquisition still uses the TI GUI.
 
@@ -149,7 +185,10 @@ $$
 N_{capture}=\left\lceil T_{capture}f_s\right\rceil
 $$
 
-The default idle guards are 5 s before and after the measured cycles, with a 2 s acquisition safety margin.
+The default idle guards are 5 s before and after the measured cycles, with a 2 s
+acquisition safety margin. Automated acquisition records that safety margin as
+additional idle baseline before stopping. The manual workflow leaves margin
+handling to the operator.
 
 ## 8. Structured output and manifest
 
@@ -163,7 +202,18 @@ Console events are one-line JSON records:
 
 Each event contains monotonic and UTC timestamps. Each `BURST_END` reports requested count, executed count, elapsed time, estimated INA226 samples, and quality flags.
 
-The default manifest directory is `measurement_manifests/`. A manifest distinguishes:
+Automated artifacts are colocated and use the campaign ID as their exact stem:
+
+```text
+<output-directory>/<campaign_id>.csv
+<output-directory>/<campaign_id>.json
+```
+
+The manifest keeps `schema_version: 1` and adds an `acquisition` object with the
+authoritative CSV path, requested serial/sensor settings, actual port, readiness
+and completion timestamps, capture duration, sample count, achieved rate,
+deadline misses, stop reason, status, and failure details. A manifest also
+distinguishes:
 
 - excluded warm-up work;
 - excluded calibration work;
@@ -173,6 +223,21 @@ The default manifest directory is `measurement_manifests/`. A manifest distingui
 - campaign status and quality flags.
 
 `UNDER_RESOLVED` means an actual burst was shorter than the minimum sample requirement. `DURATION_ANOMALY` means its duration was less than half or more than twice the calibration estimate. Such campaigns complete with `quality_status: REVIEW` and must not enter the final energy lookup table without investigation.
+
+`ACQUISITION_FAILED` means the workload completed but the INA226 capture did not.
+The manifest remains `COMPLETE` with `quality_status: REVIEW`, any partial CSV is
+retained, and the automated command exits with code 2. Workload failures retain
+completed cycle records and produce a `FAILED` manifest only after logger
+cleanup.
+
+Automated command exit codes are:
+
+| Code | Meaning |
+| ---: | --- |
+| `0` | Workload and acquisition completed cleanly |
+| `2` | Workload completed, but acquisition requires review or failed |
+| `1` | Workload or orchestration failed |
+| `130` | User interruption after cleanup |
 
 ## 9. CLI parameter reference
 
@@ -195,16 +260,20 @@ The default manifest directory is `measurement_manifests/`. A manifest distingui
 | `leading_idle_seconds`           |                s |                         5 | Baseline only                | Idle baseline before first useful burst                   |
 | `trailing_idle_seconds`          |                s |                         5 | Baseline only                | Idle baseline after final useful burst                    |
 | `safety_margin_seconds`          |                s |                         2 | Acquisition only             | Extra requested capture capacity                          |
-| `wait_for_acquisition`           |             flag |                     false | No                           | Pause at`READY` for manual GUI start                    |
-| `manifest_directory`             |             path | `measurement_manifests` | N/A                          | JSON campaign metadata destination                        |
+| `wait_for_acquisition`           |             flag |                     false | No                           | Pause at `READY` for manual GUI start                     |
+| `manifest_directory`             |             path |                      none | N/A                          | Manual-run JSON campaign metadata destination             |
 
 Every burst receives fresh parameters and input; this is part of the runner
 protocol rather than a command-line option. The preparation is excluded from
 the burst timer, while the complete sequence of forward passes is included.
 
-## 10. Current limitations and next implementation step
+## 10. Current limitations
 
-- The JSON event timestamps are generated on the target host; they are not yet injected into the TI GUI CSV.
-- The CSV processing path still needs to consume each campaign manifest and replace its historical hard-coded energy divisor with actual executed inference counts.
-- Direct INA226 control and event-defined segmentation are future phases.
+- Event timestamps and CSV timestamps are generated on the same host but are not
+  injected into each other's rows. Pairing uses the exact campaign-ID stem and
+  manifest path instead.
+- CSV processing uses `plan.inferences_per_cycle`, but active-region detection
+  remains threshold-based rather than event-indexed.
+- Direct acquisition does not automatically segment CSV rows by burst event;
+  analysis still identifies active regions from the trace and manifest timing.
 - TPU execution follows the common runner API but has not been validated in this implementation phase.
