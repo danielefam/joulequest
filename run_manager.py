@@ -145,7 +145,7 @@ class StdioAcquisitionController:
         return {
             "status": "PENDING",
             "control_protocol": "stdio_json_v1",
-            "acquisition_host": "ssh_client",
+            "acquisition_role": "controller_host",
         }
 
     def start(self):

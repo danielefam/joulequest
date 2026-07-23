@@ -193,6 +193,8 @@ class StdioAcquisitionControllerTests(unittest.TestCase):
         stopped = controller.stop()
 
         self.assertEqual(description["control_protocol"], "stdio_json_v1")
+        self.assertEqual(description["acquisition_role"], "controller_host")
+        self.assertNotIn("acquisition_host", description)
         self.assertEqual(started["status"], "RUNNING")
         self.assertEqual(stopped["sample_count"], 20)
         events = [

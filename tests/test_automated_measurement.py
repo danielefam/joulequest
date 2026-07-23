@@ -345,11 +345,11 @@ class SshExperimentControllerTests(unittest.TestCase):
 
     def _controller(self, acquisition, factory, **overrides):
         settings = {
-            "runner_host": "jetson@10.42.0.83",
-            "remote_directory": "/home/jetson",
+            "runner_host": "bench@inference-host",
+            "remote_directory": "/srv/benchmark",
             "remote_python": "python3",
             "remote_manifest_directory": "measurements_jetson",
-            "ssh_options": ["ProxyJump=dfama-25@attilio.enst.fr"],
+            "ssh_options": ["ProxyJump=relay@jump-host"],
             "acquisition_controller": acquisition,
             "startup_timeout_seconds": 1.0,
             "process_factory": factory,
@@ -397,8 +397,8 @@ class SshExperimentControllerTests(unittest.TestCase):
         ))
         command = factory.process.command
         self.assertEqual(command[0:4], ["ssh", "-T", "-o", "BatchMode=yes"])
-        self.assertIn("ProxyJump=dfama-25@attilio.enst.fr", command)
-        self.assertEqual(command[-2], "jetson@10.42.0.83")
+        self.assertIn("ProxyJump=relay@jump-host", command)
+        self.assertEqual(command[-2], "bench@inference-host")
         self.assertIn("--stdio_acquisition", command[-1])
         self.assertIn("--backend cuda", command[-1])
 
@@ -470,10 +470,7 @@ class SshExperimentControllerTests(unittest.TestCase):
 
             self.assertEqual(path.name, "campaign-remote-123.json")
             self.assertEqual(persisted["manifest_path"], str(path.resolve()))
-            self.assertEqual(
-                persisted["remote_manifest_path"],
-                "/home/jetson/measurements_jetson/campaign-remote-123.json",
-            )
+            self.assertNotIn("remote_manifest_path", persisted)
 
     def test_manifest_is_fetched_when_stream_ends_before_manifest_event(self):
         campaign_id = "campaign-fallback"
@@ -644,11 +641,14 @@ class CommandResultTests(unittest.TestCase):
             leading_idle_seconds=0.0,
             trailing_idle_seconds=0.0,
             safety_margin_seconds=0.0,
+            connection_config=None,
             runner_host=None,
+            jump_host=None,
             remote_directory=".",
             remote_python="python3",
             remote_manifest_directory="measurements_jetson",
             ssh_option=[],
+            ssh_connect_timeout_s=10.0,
             remote_startup_timeout_s=60.0,
         )
 
@@ -726,9 +726,78 @@ class CommandResultTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "requires tflite_runtime"):
                 automated.select_runner("tpu")
 
+    def test_jump_host_builds_required_ssh_options(self):
+        self.assertEqual(
+            automated.build_ssh_options(
+                "relay@jump-host",
+                10.0,
+                [],
+            ),
+            [
+                "ProxyJump=relay@jump-host",
+                "ConnectTimeout=10",
+                "ConnectionAttempts=1",
+            ],
+        )
+
+    def test_connection_config_supplies_remote_settings(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "hosts.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "runner_host": "bench@inference-host",
+                        "jump_host": "relay@jump-host",
+                        "remote_directory": "/srv/benchmark",
+                        "remote_python": "/srv/venv/bin/python",
+                        "remote_manifest_directory": "manifests",
+                        "ssh_connect_timeout_s": 7.0,
+                        "ssh_options": ["ServerAliveInterval=15"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = self._args()
+            args.connection_config = config_path
+            args.remote_directory = None
+            args.remote_python = None
+            args.remote_manifest_directory = None
+            args.ssh_connect_timeout_s = None
+
+            configured = automated.apply_connection_config(args)
+
+            self.assertEqual(configured.runner_host, "bench@inference-host")
+            self.assertEqual(configured.jump_host, "relay@jump-host")
+            self.assertEqual(configured.remote_directory, "/srv/benchmark")
+            self.assertEqual(configured.remote_python, "/srv/venv/bin/python")
+            self.assertEqual(configured.ssh_connect_timeout_s, 7.0)
+            self.assertEqual(
+                configured.ssh_option,
+                ["ServerAliveInterval=15"],
+            )
+
+    def test_cli_host_overrides_connection_config(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "hosts.json"
+            config_path.write_text(
+                json.dumps({"runner_host": "config@inference-host"}),
+                encoding="utf-8",
+            )
+            args = self._args()
+            args.connection_config = config_path
+            args.runner_host = "override@inference-host"
+
+            configured = automated.apply_connection_config(args)
+
+            self.assertEqual(
+                configured.runner_host,
+                "override@inference-host",
+            )
+
     def test_main_uses_ssh_runner_and_persists_remote_manifest(self):
         args = self._args()
-        args.runner_host = "jetson@10.42.0.83"
+        args.runner_host = "bench@inference-host"
+        args.jump_host = "relay@jump-host"
         manifest = {
             "campaign_id": "campaign-remote-main",
             "status": "COMPLETE",
@@ -771,13 +840,31 @@ class CommandResultTests(unittest.TestCase):
             remote_cls.call_args.kwargs["acquisition_controller"],
             local_acquisition,
         )
+        self.assertEqual(
+            remote_cls.call_args.kwargs["ssh_options"],
+            [
+                "ProxyJump=relay@jump-host",
+                "ConnectTimeout=10",
+                "ConnectionAttempts=1",
+            ],
+        )
         report = json.loads(output.call_args.args[0])
         self.assertEqual(report["campaign_id"], "campaign-remote-main")
         self.assertEqual(manifest["orchestration"]["mode"], "ssh")
+        self.assertEqual(
+            manifest["orchestration"]["runner_role"],
+            "inference_host",
+        )
+        self.assertEqual(
+            manifest["orchestration"]["acquisition_role"],
+            "controller_host",
+        )
+        self.assertNotIn("runner_host", manifest["orchestration"])
+        self.assertNotIn("acquisition_host", manifest["orchestration"])
 
     def test_main_persists_received_manifest_when_ssh_reports_error(self):
         args = self._args()
-        args.runner_host = "jetson@10.42.0.83"
+        args.runner_host = "bench@inference-host"
         manifest = {
             "campaign_id": "campaign-remote-error",
             "status": "FAILED",

@@ -23,10 +23,7 @@ required after starting the command.
 
 ```bash
 python automated_measurement.py \
-  --runner-host [ssh destination] \
-  --remote-directory /home/jetson \
-  --remote-python python3 \
-  --remote-manifest-directory measurements_jetson \
+  --connection-config measurement_hosts.local.json \
   --backend cuda \
   --model Models/CPU/Linear/Linear_8192_8192.pt \
   --port /dev/serial/by-id/usb-Texas_Instruments_Generic_Bulk_Device_12345678-if01 \
@@ -54,16 +51,23 @@ capture. The Jetson also retains its original manifest under
 manual `scp` is needed after a successful command.
 
 SSH must work without a password prompt because automation uses
-`BatchMode=yes`. Configure an SSH key first and verify it with:
+`BatchMode=yes`. Copy the public template, fill in the local values, and keep
+that file out of Git:
 
 ```bash
-ssh -o BatchMode=yes [ssh_destination] true
+cp measurement_hosts.example.json measurement_hosts.local.json
+$EDITOR measurement_hosts.local.json
 ```
 
-When a jump host is required, add for example:
+`measurement_hosts.local.json` contains `runner_host`, `jump_host`, remote
+paths, and optional SSH settings. It is listed in `.gitignore`. Use the values
+from that local file for a visible preflight:
 
 ```bash
---ssh-option ProxyJump=[jump host]
+ssh -J JUMP_USER@JUMP_HOST \
+  -o BatchMode=yes \
+  BENCH_USER@INFERENCE_HOST \
+  'printf "SSH_OK: "; hostname'
 ```
 
 The command returns `0` for a clean campaign, `2` when model execution completes
@@ -119,6 +123,8 @@ These are the most useful settings:
 | `--sampling_rate_hz` | INA226 samples per second | `10` |
 | `--wait_for_acquisition` | Stops and waits for you to start manual INA226 recording | off |
 | `--runner-host` | SSH destination running inference | none (single-host fallback) |
+| `--jump-host` | SSH host used to reach the inference host | none |
+| `--connection-config` | Ignored JSON containing SSH/remote settings | none |
 | `--remote-directory` | Jetson directory containing `run_manager.py` | `.` |
 | `--remote-manifest-directory` | Manifest directory on the Jetson | `measurements_jetson` |
 
@@ -152,7 +158,8 @@ Copy only the inference-side scripts:
 
 ```bash
 scp run_manager.py runner.py base_runner.py \
-  [ssh destination]:/home/jetson/
+  -o ProxyJump=JUMP_USER@JUMP_HOST \
+  BENCH_USER@INFERENCE_HOST:/path/to/energyBANERA/
 ```
 
 Keep these scripts on the PC:
