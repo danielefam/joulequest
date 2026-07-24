@@ -126,13 +126,15 @@ non-interactive SSH. No interaction is required after the command starts.
 11. The PC acknowledges the stopped logger. Only then does the Jetson write its
    final manifest and send it through SSH.
 12. The PC saves that manifest beside the CSV and prints the final
-   `AUTOMATED_MEASUREMENT_RESULT` JSON record.
+  `AUTOMATED_MEASUREMENT_RESULT` JSON record.
+13. After the local manifest has been saved atomically, the PC removes the
+  remote manifest to conserve storage on the inference board.
 
 ```bash
 python automated_measurement.py \
   --connection-config measurement_hosts.local.json \
   --backend cuda \
-  --model Models/CPU/Linear/Linear_8192_8192.pt \
+  --model Models/CUDA/Linear/Linear_8192_8192.pt \
   --port /dev/serial/by-id/usb-Texas_Instruments_Generic_Bulk_Device_12345678-if01 \
   --output-directory measurements/runs \
   --shunt-ohms 0.012 \
@@ -152,6 +154,13 @@ directory, and remote manifest directory are Jetson paths. SSH must be
 non-interactive; use repeatable `--ssh-option` arguments for options such as a
 custom identity file. Store host-specific settings in the ignored
 `measurement_hosts.local.json`, created from `measurement_hosts.example.json`.
+
+The remote manifest is a transfer/recovery file rather than the authoritative
+archive. It is deleted only after the same campaign ID has been persisted in
+the PC output directory. Use `--keep-remote-manifest` when a board-side copy is
+needed for diagnostics. A failed local write or failed cleanup SSH command
+leaves the remote file in place for recovery and does not overwrite the local
+measurement result.
 
 ### Manual fallback
 
@@ -174,8 +183,8 @@ Example CPU campaign with automatic count:
 
 ```bash
 python run_manager.py \
-  --backend cpu \
-  --model Models/CPU/Linear/Linear_64_64.pt \
+  --backend cuda \
+  --model Models/CUDA/Linear/Linear_64_64.pt \
   --number_of_cycles 5 \
   --sleep_time 5 \
   --sampling_rate_hz 10 \

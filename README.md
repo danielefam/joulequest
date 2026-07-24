@@ -25,11 +25,11 @@ required after starting the command.
 python automated_measurement.py \
   --connection-config measurement_hosts.local.json \
   --backend cuda \
-  --model Models/CPU/Linear/Linear_8192_8192.pt \
   --port /dev/serial/by-id/usb-Texas_Instruments_Generic_Bulk_Device_12345678-if01 \
   --output-directory measurements/runs \
   --shunt-ohms 0.012 \
-  --max-expected-current-a 5.0
+  --max-expected-current-a 5.0 \
+  --model Models/CUDA/Linear/Linear_8192_8192.pt
 ```
 
 `--model` and `--remote-directory` refer to paths on the Jetson. `--port` and
@@ -47,8 +47,11 @@ The CSV contains the leading idle baseline, measured cycles, inter-cycle idle,
 trailing idle baseline, and `safety_margin_seconds`. The logger process exits
 before the final manifest is written, so manifest I/O is not present in the
 capture. The Jetson also retains its original manifest under
-`--remote-manifest-directory`; the PC receives a copy automatically, so no
-manual `scp` is needed after a successful command.
+`--remote-manifest-directory` until the PC has saved its local copy. The PC then
+removes the remote manifest to conserve board storage, so no manual `scp` or
+cleanup is needed after a successful command. Use `--keep-remote-manifest` to
+retain the Jetson copy for diagnostics. If local persistence or cleanup SSH
+fails, the remote recovery copy is not removed.
 
 SSH must work without a password prompt because automation uses
 `BatchMode=yes`. Copy the public template, fill in the local values, and keep
@@ -85,10 +88,10 @@ It runs the test in three steps:
 2. Calibration: finds a suitable number of model runs. This part is not measured.
 3. Measurement: runs the real test cycles.
 
-A simple CPU example is:
+A simple CUDA example is:
 
 ```bash
-python run_manager.py --backend cpu --model Models/CPU/Linear/Linear_64_64.pt --wait_for_acquisition
+python run_manager.py --backend cuda --model Models/CUDA/Linear/Linear_64_64.pt --wait_for_acquisition
 ```
 
 Use a model file that exists on your computer. The model name tells the program its shape. For example, `Linear_64_64.pt` means a linear layer with 64 inputs and 64 outputs.
@@ -127,6 +130,7 @@ These are the most useful settings:
 | `--connection-config` | Ignored JSON containing SSH/remote settings | none |
 | `--remote-directory` | Jetson directory containing `run_manager.py` | `.` |
 | `--remote-manifest-directory` | Manifest directory on the Jetson | `measurements_jetson` |
+| `--keep-remote-manifest` | Keep the Jetson copy after local persistence | off |
 
 The automated command accepts the same adaptive workload controls but does not
 accept `--wait_for_acquisition`, logger duration/sample limits, or overwrite.
@@ -137,8 +141,8 @@ Example with shorter cycles:
 
 ```bash
 python run_manager.py \
-  --backend cpu \
-  --model Models/CPU/Linear/Linear_64_64.pt \
+  --backend cuda \
+  --model Models/CUDA/Linear/Linear_64_64.pt \
   --number_of_cycles 3 \
   --sleep_time 5 \
   --target_burst_seconds 5 \
@@ -172,6 +176,32 @@ ina226_serial_logger.py
 The no-SSH single-host fallback remains available by omitting `--runner-host`;
 that machine then needs all five runtime scripts and both backend and serial
 dependencies.
+
+## Complete experiment campaign
+
+`automated_measurement.py` intentionally runs one experiment. To schedule the
+complete Linear/Conv matrix for one physical board, use the separate batch
+launcher:
+
+```bash
+./run_measurement_campaign.sh --board BOARD_LABEL --suite all
+```
+
+The launcher invokes `automated_measurement.py` once per model, stores results
+under `measurements/runs/BOARD_LABEL/`, stops on the first error by default,
+and skips models that already have a `COMPLETE` manifest. It never switches
+boards. After it finishes, change the physical board and start a new invocation
+with a new board label and local connection/current settings.
+
+Inspect all generated commands without starting SSH, inference, or acquisition:
+
+```bash
+./run_measurement_campaign.sh --board BOARD_LABEL --suite all --dry-run
+```
+
+Campaign parameters and matrices can be edited at the beginning of the script
+or overridden with environment variables. See
+`docs_new/experiment_campaign.md` for the complete matrix and examples.
 
 ## More help
 

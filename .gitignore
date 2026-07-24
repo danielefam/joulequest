@@ -12,5 +12,5 @@ docs_new/*
 !docs_new/adaptive_burst_measurement.md
 !docs_new/cli_acquisition_report.md
 !docs_new/run_manager_update.md
-tests/
+!docs_new/experiment_campaign.md
 measurement_hosts.local.json
