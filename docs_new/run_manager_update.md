@@ -186,7 +186,7 @@ The remote-controlled mode is selected with:
 ```bash
 python run_manager.py \
   --backend cuda \
-  --model Models/CPU/Linear/Linear_64_64.pt \
+  --model Models/CUDA/Linear/Linear_64_64.pt \
   --manifest_directory measurement_manifests \
   --stdio_acquisition
 ```

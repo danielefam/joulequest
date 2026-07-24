@@ -524,6 +524,39 @@ class SshExperimentController:
             return None
         return manifest if isinstance(manifest, dict) else None
 
+    def delete_remote_manifest(self, campaign_id):
+        if (
+            not isinstance(campaign_id, str)
+            or not campaign_id
+            or posixpath.basename(campaign_id) != campaign_id
+            or campaign_id in (".", "..")
+        ):
+            raise RemoteExperimentError("Invalid campaign ID for remote cleanup")
+        remote_path = posixpath.join(
+            self.remote_manifest_directory,
+            f"{campaign_id}.json",
+        )
+        remote_command = (
+            f"cd {shlex.quote(self.remote_directory)} && "
+            f"rm -f -- {shlex.quote(remote_path)}"
+        )
+        try:
+            result = self.run_factory(
+                [*self._ssh_prefix(), remote_command],
+                capture_output=True,
+                text=True,
+                timeout=10.0,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            raise RemoteExperimentError(
+                "Could not remove the remote manifest"
+            ) from error
+        if result.returncode != 0:
+            raise RemoteExperimentError(
+                "Could not remove the remote manifest "
+                f"(SSH exit code {result.returncode})"
+            )
+
     def _read_stdout(self):
         try:
             for line in self.process.stdout:
@@ -761,7 +794,7 @@ def persist_local_manifest(manifest, output_directory):
     return path
 
 
-def prepare_remote_manifest(manifest, args):
+def prepare_remote_manifest(manifest, args, remote_controller=None):
     manifest.setdefault(
         "orchestration",
         {
@@ -770,7 +803,16 @@ def prepare_remote_manifest(manifest, args):
             "acquisition_role": "controller_host",
         },
     )
-    return persist_local_manifest(manifest, args.output_directory)
+    path = persist_local_manifest(manifest, args.output_directory)
+    if (
+        remote_controller is not None
+        and not getattr(args, "keep_remote_manifest", False)
+    ):
+        try:
+            remote_controller.delete_remote_manifest(manifest.get("campaign_id"))
+        except RemoteExperimentError as error:
+            print(f"warning: {error}; remote recovery copy retained", file=sys.stderr)
+    return path
 
 
 def load_connection_config(path):
@@ -913,6 +955,11 @@ def build_argument_parser():
         "--remote-manifest-directory",
         default=None,
         help="Manifest directory on the inference host",
+    )
+    parser.add_argument(
+        "--keep-remote-manifest",
+        action="store_true",
+        help="Retain the inference-host manifest after saving its local copy",
     )
     parser.add_argument(
         "--ssh-option",
@@ -1074,7 +1121,7 @@ def main():
                 startup_timeout_seconds=args.remote_startup_timeout_s,
             )
             manifest = remote_controller.execute(args)
-            prepare_remote_manifest(manifest, args)
+            prepare_remote_manifest(manifest, args, remote_controller)
         else:
             manager = build_local_manager(args, controller)
             manifest = manager.execute()
@@ -1087,7 +1134,7 @@ def main():
         )
         if args.runner_host is not None and manifest is not None:
             try:
-                prepare_remote_manifest(manifest, args)
+                prepare_remote_manifest(manifest, args, remote_controller)
             except OSError:
                 pass
         report = build_result_report(
@@ -1107,7 +1154,7 @@ def main():
         )
         if args.runner_host is not None and manifest is not None:
             try:
-                prepare_remote_manifest(manifest, args)
+                prepare_remote_manifest(manifest, args, remote_controller)
             except OSError:
                 pass
         report = build_result_report(

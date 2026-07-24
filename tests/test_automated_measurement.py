@@ -500,6 +500,32 @@ class SshExperimentControllerTests(unittest.TestCase):
             fetch.call_args.args[0][-1],
         )
 
+    def test_remote_manifest_is_deleted_with_same_ssh_route(self):
+        run = Mock(return_value=SimpleNamespace(returncode=0))
+        controller = self._controller(Mock(), Mock(), run_factory=run)
+
+        controller.delete_remote_manifest("campaign-cleanup")
+
+        command = run.call_args.args[0]
+        self.assertIn("ProxyJump=relay@jump-host", command)
+        self.assertEqual(command[-2], "bench@inference-host")
+        self.assertIn(
+            "rm -f -- measurements_jetson/campaign-cleanup.json",
+            command[-1],
+        )
+
+    def test_remote_cleanup_requires_safe_campaign_id(self):
+        run = Mock()
+        controller = self._controller(Mock(), Mock(), run_factory=run)
+
+        with self.assertRaisesRegex(
+            automated.RemoteExperimentError,
+            "Invalid campaign ID",
+        ):
+            controller.delete_remote_manifest("../other-file")
+
+        run.assert_not_called()
+
     def test_reader_thread_failure_is_reported_directly(self):
         process = FakeSshProcess(["ssh"], [], returncode=1)
         process.stdout = BrokenStream()
@@ -836,6 +862,9 @@ class CommandResultTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         remote.execute.assert_called_once_with(args)
         persist.assert_called_once_with(manifest, args.output_directory)
+        remote.delete_remote_manifest.assert_called_once_with(
+            "campaign-remote-main"
+        )
         self.assertIs(
             remote_cls.call_args.kwargs["acquisition_controller"],
             local_acquisition,
@@ -861,6 +890,81 @@ class CommandResultTests(unittest.TestCase):
         )
         self.assertNotIn("runner_host", manifest["orchestration"])
         self.assertNotIn("acquisition_host", manifest["orchestration"])
+
+    def test_remote_cleanup_runs_only_after_local_manifest_is_durable(self):
+        args = self._args()
+        args.keep_remote_manifest = False
+        manifest = {"campaign_id": "campaign-cleanup"}
+        remote = Mock()
+        calls = []
+
+        with patch.object(
+            automated,
+            "persist_local_manifest",
+            side_effect=lambda *_: calls.append("persist") or Path("local.json"),
+        ):
+            remote.delete_remote_manifest.side_effect = lambda *_: calls.append(
+                "delete"
+            )
+            path = automated.prepare_remote_manifest(manifest, args, remote)
+
+        self.assertEqual(path, Path("local.json"))
+        self.assertEqual(calls, ["persist", "delete"])
+
+    def test_remote_manifest_is_retained_when_requested(self):
+        args = self._args()
+        args.keep_remote_manifest = True
+        manifest = {"campaign_id": "campaign-retained"}
+        remote = Mock()
+
+        with patch.object(
+            automated,
+            "persist_local_manifest",
+            return_value=Path("local.json"),
+        ):
+            automated.prepare_remote_manifest(manifest, args, remote)
+
+        remote.delete_remote_manifest.assert_not_called()
+
+    def test_remote_manifest_is_retained_if_local_persistence_fails(self):
+        args = self._args()
+        args.keep_remote_manifest = False
+        manifest = {"campaign_id": "campaign-recovery"}
+        remote = Mock()
+
+        with (
+            patch.object(
+                automated,
+                "persist_local_manifest",
+                side_effect=OSError("disk full"),
+            ),
+            self.assertRaisesRegex(OSError, "disk full"),
+        ):
+            automated.prepare_remote_manifest(manifest, args, remote)
+
+        remote.delete_remote_manifest.assert_not_called()
+
+    def test_remote_cleanup_failure_keeps_successful_local_copy(self):
+        args = self._args()
+        args.keep_remote_manifest = False
+        manifest = {"campaign_id": "campaign-recovery"}
+        remote = Mock()
+        remote.delete_remote_manifest.side_effect = automated.RemoteExperimentError(
+            "cleanup SSH failed"
+        )
+
+        with (
+            patch.object(
+                automated,
+                "persist_local_manifest",
+                return_value=Path("local.json"),
+            ),
+            patch("builtins.print") as output,
+        ):
+            path = automated.prepare_remote_manifest(manifest, args, remote)
+
+        self.assertEqual(path, Path("local.json"))
+        self.assertIn("remote recovery copy retained", output.call_args.args[0])
 
     def test_main_persists_received_manifest_when_ssh_reports_error(self):
         args = self._args()
@@ -892,7 +996,7 @@ class CommandResultTests(unittest.TestCase):
             exit_code = automated.main()
 
         self.assertEqual(exit_code, 1)
-        persist.assert_called_once_with(manifest, args)
+        persist.assert_called_once_with(manifest, args, remote)
         report = json.loads(output.call_args.args[0])
         self.assertEqual(report["campaign_id"], "campaign-remote-error")
 

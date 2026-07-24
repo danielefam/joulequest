@@ -184,7 +184,7 @@ class RunManager:
         model_path,
         number_of_cycles=5,
         sleep_time=10.0,
-        backend="cpu",
+        backend="cuda",
         inferences_per_cycle=None,
         target_burst_seconds=10.0,
         sampling_rate_hz=10.0,
