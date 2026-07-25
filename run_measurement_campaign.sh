@@ -21,25 +21,26 @@ MODEL_SUFFIX="${MODEL_SUFFIX:-.pt}"
 LINEAR_MODEL_DIRECTORY="${LINEAR_MODEL_DIRECTORY:-${MODEL_ROOT}/Linear}"
 CONV_MODEL_DIRECTORY="${CONV_MODEL_DIRECTORY:-${MODEL_ROOT}/Conv}"
 
-NUMBER_OF_CYCLES="${NUMBER_OF_CYCLES:-10}"
-SLEEP_TIME="${SLEEP_TIME:-0.7}"
+NUMBER_OF_CYCLES="${NUMBER_OF_CYCLES:-100}"
+SLEEP_TIME="${SLEEP_TIME:-3}"
 TARGET_BURST_SECONDS="${TARGET_BURST_SECONDS:-0}"
 SAMPLING_RATE_HZ="${SAMPLING_RATE_HZ:-100}"
-MIN_ACTIVE_SAMPLES="${MIN_ACTIVE_SAMPLES:-50}"
+MIN_ACTIVE_SAMPLES="${MIN_ACTIVE_SAMPLES:-100}"
 WARMUP_INFERENCES="${WARMUP_INFERENCES:-20}"
 WARMUP_SECONDS="${WARMUP_SECONDS:-0}"
 WARMUP_COOLDOWN_SECONDS="${WARMUP_COOLDOWN_SECONDS:-}"
-CALIBRATION_INITIAL_INFERENCES="${CALIBRATION_INITIAL_INFERENCES:-10}"
-CALIBRATION_TARGET_SECONDS="${CALIBRATION_TARGET_SECONDS:-0.5}"
-CALIBRATION_REPETITIONS="${CALIBRATION_REPETITIONS:-4}"
+CALIBRATION_INITIAL_INFERENCES="${CALIBRATION_INITIAL_INFERENCES:-20}"
+CALIBRATION_TARGET_SECONDS="${CALIBRATION_TARGET_SECONDS:-1}"
+CALIBRATION_REPETITIONS="${CALIBRATION_REPETITIONS:-8}"
 MAX_RELATIVE_MAD="${MAX_RELATIVE_MAD:-0.15}"
 MAX_CALIBRATION_INFERENCES="${MAX_CALIBRATION_INFERENCES:-1000000}"
 LEADING_IDLE_SECONDS="${LEADING_IDLE_SECONDS:-5}"
-TRAILING_IDLE_SECONDS="${TRAILING_IDLE_SECONDS:-5}"
+TRAILING_IDLE_SECONDS="${TRAILING_IDLE_SECONDS:-30}"
 SAFETY_MARGIN_SECONDS="${SAFETY_MARGIN_SECONDS:-2}"
 SHUNT_OHMS="${SHUNT_OHMS:-0.012}"
 MAX_EXPECTED_CURRENT_A="${MAX_EXPECTED_CURRENT_A:-5.0}"
 INA226_PORT="${INA226_PORT:-}"
+EXPERIMENT_COOLDOWN_SECONDS="${EXPERIMENT_COOLDOWN_SECONDS:-20}"
 
 LINEAR_SIZES="${LINEAR_SIZES:-64 128 256 512 1024 2048 4096 8192}"
 
@@ -67,6 +68,8 @@ Options:
   --dry-run           Print commands without running measurements.
   --continue-on-error Continue after an experiment exits nonzero.
   --repeat-completed  Rerun experiments with an existing COMPLETE manifest.
+    --experiment-cooldown-seconds SECONDS
+                                            Idle time between two executed experiments (default: 0).
   -h, --help          Show this message.
 
 The connection target and remote paths come from measurement_hosts.local.json.
@@ -154,6 +157,11 @@ while (($#)); do
             REPEAT_COMPLETED=1
             shift
             ;;
+        --experiment-cooldown-seconds)
+            (($# >= 2)) || die "--experiment-cooldown-seconds requires a value"
+            EXPERIMENT_COOLDOWN_SECONDS="$2"
+            shift 2
+            ;;
         -h|--help)
             usage
             exit 0
@@ -208,6 +216,8 @@ is_positive_number "$SAMPLING_RATE_HZ" ||
 is_positive_number "$SHUNT_OHMS" || die "SHUNT_OHMS must be positive"
 is_positive_number "$MAX_EXPECTED_CURRENT_A" ||
     die "MAX_EXPECTED_CURRENT_A must be positive"
+is_nonnegative_number "$EXPERIMENT_COOLDOWN_SECONDS" ||
+    die "EXPERIMENT_COOLDOWN_SECONDS must be nonnegative"
 
 [[ -f "${SCRIPT_DIR}/automated_measurement.py" ]] ||
     die "automated_measurement.py not found beside this script"
@@ -293,6 +303,14 @@ attempted=0
 completed=0
 skipped=0
 failed=0
+experiment_started=0
+interrupted=0
+
+handle_interrupt() {
+    interrupted=1
+}
+
+trap handle_interrupt INT
 
 run_experiment() {
     local model_path="$1"
@@ -318,12 +336,32 @@ run_experiment() {
         return 0
     fi
 
+    if ((experiment_started)) && is_positive_number "$EXPERIMENT_COOLDOWN_SECONDS"; then
+        printf '  cooling board for %s seconds before next experiment\n' \
+            "$EXPERIMENT_COOLDOWN_SECONDS"
+        set +e
+        sleep "$EXPERIMENT_COOLDOWN_SECONDS"
+        exit_code=$?
+        set -e
+        if ((interrupted || exit_code == 130)); then
+            printf 'Campaign interrupted during board cooldown.\n' >&2
+            return 130
+        fi
+        if ((exit_code != 0)); then
+            printf '  cooldown failed with exit code %d\n' "$exit_code" >&2
+            return "$exit_code"
+        fi
+    fi
+    experiment_started=1
+
     set +e
     "${command[@]}" 2>&1 | tee "$log_path"
     pipeline_status=("${PIPESTATUS[@]}")
     set -e
     exit_code="${pipeline_status[0]}"
-    if ((exit_code == 0 && pipeline_status[1] != 0)); then
+    if ((interrupted || exit_code == 130 || pipeline_status[1] == 130)); then
+        exit_code=130
+    elif ((exit_code == 0 && pipeline_status[1] != 0)); then
         exit_code="${pipeline_status[1]}"
     fi
     timestamp="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
@@ -339,6 +377,10 @@ run_experiment() {
     printf '%s\t%s\tFAILED\t%d\t%s\n' \
         "$timestamp" "$model_path" "$exit_code" "$log_path" >>"$SUMMARY_PATH"
     printf '  failed with exit code %d; log: %s\n' "$exit_code" "$log_path" >&2
+    if ((exit_code == 130)); then
+        printf 'Campaign interrupted by user; completed experiments are preserved.\n' >&2
+        return 130
+    fi
     if ((CONTINUE_ON_ERROR)); then
         return 0
     fi

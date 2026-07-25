@@ -141,17 +141,17 @@ campaign parameters:
 | `LINEAR_MODEL_DIRECTORY` | `${MODEL_ROOT}/Linear` | Linear model directory |
 | `CONV_MODEL_DIRECTORY` | `${MODEL_ROOT}/Conv` | Conv model directory |
 | `MODEL_SUFFIX` | `.pt` | Filename suffix |
-| `NUMBER_OF_CYCLES` | `10` | Measured cycles per experiment |
-| `SLEEP_TIME` | `0.7` s | Idle time between measured cycles |
+| `NUMBER_OF_CYCLES` | `100` | Measured cycles per experiment |
+| `SLEEP_TIME` | `2` s | Idle time between measured cycles of one layer |
 | `TARGET_BURST_SECONDS` | `0` s | Time requirement in addition to sample requirement |
 | `SAMPLING_RATE_HZ` | `100` Hz | Requested INA226 sampling rate |
-| `MIN_ACTIVE_SAMPLES` | `50` | Minimum active samples per cycle |
+| `MIN_ACTIVE_SAMPLES` | `100` | Minimum active samples per cycle |
 | `WARMUP_INFERENCES` | `20` | Excluded warm-up count |
 | `WARMUP_SECONDS` | `0` s | Optional excluded warm-up duration |
 | `WARMUP_COOLDOWN_SECONDS` | empty | Use `SLEEP_TIME`, or set an explicit cooldown |
-| `CALIBRATION_INITIAL_INFERENCES` | `10` | Calibration sizing pilot count |
-| `CALIBRATION_TARGET_SECONDS` | `0.5` s | Target full calibration-batch duration |
-| `CALIBRATION_REPETITIONS` | `4` | Full calibration batches including one discard |
+| `CALIBRATION_INITIAL_INFERENCES` | `20` | Calibration sizing pilot count |
+| `CALIBRATION_TARGET_SECONDS` | `1` s | Target full calibration-batch duration |
+| `CALIBRATION_REPETITIONS` | `8` | Full calibration batches including one discard |
 | `MAX_RELATIVE_MAD` | `0.15` | Maximum accepted relative MAD and CV |
 | `MAX_CALIBRATION_INFERENCES` | `1000000` | Calibration batch safety cap |
 | `LEADING_IDLE_SECONDS` | `5` s | Baseline before the first measured cycle |
@@ -160,6 +160,7 @@ campaign parameters:
 | `SHUNT_OHMS` | `0.012` ohm | Installed shunt resistance |
 | `MAX_EXPECTED_CURRENT_A` | `5.0` A | Board/workload current range |
 | `INA226_PORT` | empty | Auto-detect one TI-SCB; set to force a port |
+| `EXPERIMENT_COOLDOWN_SECONDS` | `0` s | Board cooling time between two executed layer experiments |
 
 The matrix variables are:
 
@@ -187,6 +188,20 @@ CONV_IMAGE_SIZES="32 64" \
 CONV_KERNEL_PADDING="3:0" \
   ./run_measurement_campaign.sh --board TEST_LABEL --suite all --dry-run
 ```
+
+To let the board cool for one minute between different layer experiments:
+
+```bash
+./run_measurement_campaign.sh \
+  --board BOARD_LABEL \
+  --suite all \
+  --experiment-cooldown-seconds 60
+```
+
+This cooldown runs before the next executed experiment. It is not applied to
+models skipped during resume and does not add a delay after the final model.
+It is independent of `SLEEP_TIME`, which separates measured cycles inside one
+experiment.
 
 ## 5. Result organization
 
@@ -227,6 +242,10 @@ To continue after failures:
 The launcher still exits nonzero after the matrix if one or more experiments
 failed, allowing a calling terminal or scheduler to detect an incomplete
 campaign.
+
+`Ctrl+C` always stops the campaign with exit code `130`, including when
+`--continue-on-error` is active. The interrupted attempt is recorded, completed
+manifests remain resumable, and no next model is started.
 
 When restarted with the same board label, the launcher scans existing JSON
 manifests and skips a model when it finds both:

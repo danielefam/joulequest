@@ -216,6 +216,7 @@ def compute_means_variances(df, threshold, sampling_interval, inferences_per_cyc
                 
                  "energy_avg_J":extra_energy_avg,
                  "energy_var_J2":extra_energy_var,
+                 "region_count":len(regions),
     })
 
     # Convert sums to averages    
