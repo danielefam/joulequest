@@ -1,0 +1,9 @@
+{
+  "runner_host": "BENCH_USER@INFERENCE_HOST",
+  "jump_host": "JUMP_USER@JUMP_HOST",
+  "remote_directory": "/path/to/energyBANERA",
+  "remote_python": "/path/to/python",
+  "remote_manifest_directory": "measurement_manifests",
+  "ssh_connect_timeout_s": 10.0,
+  "ssh_options": []
+}

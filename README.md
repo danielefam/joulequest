@@ -1,10 +1,86 @@
 # energyBANERA
 
-This project runs small AI-model tests and can measure their power use with an INA226 device.
+This project runs small AI-model tests and measures their power use with an
+INA226EVM connected through a TI-SCB serial device.
 
-## Main file
+## Automated measurement
 
-The main file is `run_manager.py`.
+`automated_measurement.py` is the primary entry point for one unattended
+experiment in the two-host setup:
+
+```text
+PC connected to TI-SCB              Jetson reached through SSH
+automated_measurement.py  ------->  run_manager.py
+ina226_serial_logger.py              runner.py
+                                      base_runner.py
+```
+
+The PC starts the Jetson experiment over SSH. The Jetson performs model setup,
+excluded warm-up, and excluded calibration, then asks the PC to start local
+INA226 acquisition. After the measured cycles and idle guards, the Jetson asks
+the PC to stop acquisition before writing its final manifest. No interaction is
+required after starting the command.
+
+```bash
+python automated_measurement.py \
+  --connection-config measurement_hosts.local.json \
+  --backend cuda \
+  --port /dev/serial/by-id/usb-Texas_Instruments_Generic_Bulk_Device_12345678-if01 \
+  --output-directory measurements/runs \
+  --shunt-ohms 0.012 \
+  --max-expected-current-a 5.0 \
+  --model Models/CUDA/Linear/Linear_8192_8192.pt
+```
+
+`--model` and `--remote-directory` refer to paths on the Jetson. `--port` and
+`--output-directory` refer to the PC connected to the TI-SCB. Omit `--port`
+when exactly one TI-SCB device is connected and can be auto-detected. Each
+command creates an unambiguous local pair:
+
+```text
+measurements/runs/<campaign_id>.csv
+measurements/runs/<campaign_id>.json
+```
+
+Acquisition begins only after model loading, warm-up, and adaptive calibration.
+The CSV contains the leading idle baseline, measured cycles, inter-cycle idle,
+trailing idle baseline, and `safety_margin_seconds`. The logger process exits
+before the final manifest is written, so manifest I/O is not present in the
+capture. The Jetson also retains its original manifest under
+`--remote-manifest-directory` until the PC has saved its local copy. The PC then
+removes the remote manifest to conserve board storage, so no manual `scp` or
+cleanup is needed after a successful command. Use `--keep-remote-manifest` to
+retain the Jetson copy for diagnostics. If local persistence or cleanup SSH
+fails, the remote recovery copy is not removed.
+
+SSH must work without a password prompt because automation uses
+`BatchMode=yes`. Copy the public template, fill in the local values, and keep
+that file out of Git:
+
+```bash
+cp measurement_hosts.example.json measurement_hosts.local.json
+$EDITOR measurement_hosts.local.json
+```
+
+`measurement_hosts.local.json` contains `runner_host`, `jump_host`, remote
+paths, and optional SSH settings. It is listed in `.gitignore`. Use the values
+from that local file for a visible preflight:
+
+```bash
+ssh -J JUMP_USER@JUMP_HOST \
+  -o BatchMode=yes \
+  BENCH_USER@INFERENCE_HOST \
+  'printf "SSH_OK: "; hostname'
+```
+
+The command returns `0` for a clean campaign, `2` when model execution completes
+but acquisition is invalid, `1` for an experiment failure, and `130` after a
+cleaned-up user interruption. Its final stdout line is a JSON result containing
+the campaign status, timing, sample count, and both output paths.
+
+## Manual fallback
+
+`run_manager.py` remains available for runner-only or manual GUI acquisition.
 
 It runs the test in three steps:
 
@@ -12,10 +88,10 @@ It runs the test in three steps:
 2. Calibration: finds a suitable number of model runs. This part is not measured.
 3. Measurement: runs the real test cycles.
 
-A simple CPU example is:
+A simple CUDA example is:
 
 ```bash
-python run_manager.py --backend cpu --model Models/CPU/Linear/Linear_64_64.pt --wait_for_acquisition
+python run_manager.py --backend cuda --model Models/CUDA/Linear/Linear_64_64.pt --wait_for_acquisition
 ```
 
 Use a model file that exists on your computer. The model name tells the program its shape. For example, `Linear_64_64.pt` means a linear layer with 64 inputs and 64 outputs.
@@ -23,6 +99,8 @@ Use a model file that exists on your computer. The model name tells the program 
 ## Important files
 
 - `run_manager.py`: starts and manages the measurement.
+- `automated_measurement.py`: runs on the PC and coordinates SSH plus local acquisition.
+- `base_runner.py`: defines the common timed-burst runner contract.
 - `runner.py`: runs the model on CPU, CUDA, or Edge TPU.
 - `ina226_serial_logger.py`: saves measurements directly from the INA226 device to a CSV file.
 - `banera_pt_requirements.txt`: saved Python environment for PyTorch CPU/CUDA work.
@@ -47,13 +125,24 @@ These are the most useful settings:
 | `--target_burst_seconds` | Desired duration, in seconds, of each real cycle | `10` |
 | `--sampling_rate_hz` | INA226 samples per second | `10` |
 | `--wait_for_acquisition` | Stops and waits for you to start manual INA226 recording | off |
+| `--runner-host` | SSH destination running inference | none (single-host fallback) |
+| `--jump-host` | SSH host used to reach the inference host | none |
+| `--connection-config` | Ignored JSON containing SSH/remote settings | none |
+| `--remote-directory` | Jetson directory containing `run_manager.py` | `.` |
+| `--remote-manifest-directory` | Manifest directory on the Jetson | `measurements_jetson` |
+| `--keep-remote-manifest` | Keep the Jetson copy after local persistence | off |
+
+The automated command accepts the same adaptive workload controls but does not
+accept `--wait_for_acquisition`, logger duration/sample limits, or overwrite.
+Its `--sampling_rate_hz` value controls both burst planning and the logger
+interval.
 
 Example with shorter cycles:
 
 ```bash
 python run_manager.py \
-  --backend cpu \
-  --model Models/CPU/Linear/Linear_64_64.pt \
+  --backend cuda \
+  --model Models/CUDA/Linear/Linear_64_64.pt \
   --number_of_cycles 3 \
   --sleep_time 5 \
   --target_burst_seconds 5 \
@@ -62,19 +151,104 @@ python run_manager.py \
 
 ## Python environment
 
-Use the PyTorch requirements for CPU or CUDA work:
+On the PC connected to the TI-SCB, install pyserial:
 
 ```bash
-conda create --name banera_pt --file banera_pt_requirements.txt
-conda activate banera_pt
+python -m pip install -r Docs/INA226EVM/requirements.txt
 ```
 
-Use the TensorFlow requirements only for Edge TPU work:
+On the Jetson, use its JetPack-compatible PyTorch environment for CPU or CUDA.
+Copy only the inference-side scripts:
 
 ```bash
-conda create --name banera_tf --file banera_tf_requirements.txt
-conda activate banera_tf
+scp run_manager.py runner.py base_runner.py \
+  -o ProxyJump=JUMP_USER@JUMP_HOST \
+  BENCH_USER@INFERENCE_HOST:/path/to/energyBANERA/
 ```
+
+Keep these scripts on the PC:
+
+```text
+automated_measurement.py
+ina226_serial_logger.py
+```
+
+The no-SSH single-host fallback remains available by omitting `--runner-host`;
+that machine then needs all five runtime scripts and both backend and serial
+dependencies.
+
+## Complete experiment campaign
+
+`automated_measurement.py` intentionally runs one experiment. To schedule the
+complete Linear/Conv matrix for one physical board, use the separate batch
+launcher:
+
+```bash
+./run_measurement_campaign.sh --board BOARD_LABEL --suite all
+```
+
+The launcher invokes `automated_measurement.py` once per model, stores results
+under `measurements/runs/BOARD_LABEL/`, stops on the first error by default,
+and skips models that already have a `COMPLETE` manifest. It never switches
+boards. After it finishes, change the physical board and start a new invocation
+with a new board label and local connection/current settings.
+
+Inspect all generated commands without starting SSH, inference, or acquisition:
+
+```bash
+./run_measurement_campaign.sh --board BOARD_LABEL --suite all --dry-run
+```
+
+Add an idle cooling interval between different layer experiments when needed:
+
+```bash
+./run_measurement_campaign.sh \
+  --board BOARD_LABEL \
+  --suite all \
+  --experiment-cooldown-seconds 60
+```
+
+`Ctrl+C` stops the whole campaign even with `--continue-on-error`; restarting
+with the same board label skips experiments that already have a `COMPLETE`
+manifest.
+
+Campaign parameters and matrices can be edited at the beginning of the script
+or overridden with environment variables. See
+`docs_new/experiment_campaign.md` for the complete matrix and examples.
+
+## Process campaign results
+
+Process the colocated CSV/JSON pairs and regenerate the per-measurement PDFs and
+summary with:
+
+```bash
+MPLBACKEND=Agg python processing_report/process_and_visualize.py
+```
+
+By default, the script reads `measurements/runs/jetson_nano_base`, finds each
+manifest beside its same-stem CSV, uses the achieved sampling rate recorded for
+that acquisition, and processes only manifests with `status: COMPLETE`.
+Incomplete CSV captures are reported and skipped rather than producing empty
+statistics.
+
+The default filter parameters are `kernel_size=7`, `cutoff=0.5 Hz`, and
+`window_size=41`. They were selected against the current 59-measurement CUDA
+campaign by minimizing the difference between detected active regions and the
+100 cycles recorded in each manifest. Override them when processing data from a
+different board or sampling profile:
+
+```bash
+python processing_report/process_and_visualize.py \
+  --data-dir measurements/runs/BOARD_LABEL \
+  --output-dir measurements/Plot/BOARD_LABEL \
+  --kernel-size 7 \
+  --cutoff 4 \
+  --window-size 41
+```
+
+The generated `summary.csv` includes model and campaign identity, quality
+status, achieved sampling rate, inference count, expected and detected active
+regions, threshold, power mean/variance, and energy mean/variance.
 
 ## More help
 
