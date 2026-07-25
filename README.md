@@ -199,9 +199,56 @@ Inspect all generated commands without starting SSH, inference, or acquisition:
 ./run_measurement_campaign.sh --board BOARD_LABEL --suite all --dry-run
 ```
 
+Add an idle cooling interval between different layer experiments when needed:
+
+```bash
+./run_measurement_campaign.sh \
+  --board BOARD_LABEL \
+  --suite all \
+  --experiment-cooldown-seconds 60
+```
+
+`Ctrl+C` stops the whole campaign even with `--continue-on-error`; restarting
+with the same board label skips experiments that already have a `COMPLETE`
+manifest.
+
 Campaign parameters and matrices can be edited at the beginning of the script
 or overridden with environment variables. See
 `docs_new/experiment_campaign.md` for the complete matrix and examples.
+
+## Process campaign results
+
+Process the colocated CSV/JSON pairs and regenerate the per-measurement PDFs and
+summary with:
+
+```bash
+MPLBACKEND=Agg python processing_report/process_and_visualize.py
+```
+
+By default, the script reads `measurements/runs/jetson_nano_base`, finds each
+manifest beside its same-stem CSV, uses the achieved sampling rate recorded for
+that acquisition, and processes only manifests with `status: COMPLETE`.
+Incomplete CSV captures are reported and skipped rather than producing empty
+statistics.
+
+The default filter parameters are `kernel_size=7`, `cutoff=0.5 Hz`, and
+`window_size=41`. They were selected against the current 59-measurement CUDA
+campaign by minimizing the difference between detected active regions and the
+100 cycles recorded in each manifest. Override them when processing data from a
+different board or sampling profile:
+
+```bash
+python processing_report/process_and_visualize.py \
+  --data-dir measurements/runs/BOARD_LABEL \
+  --output-dir measurements/Plot/BOARD_LABEL \
+  --kernel-size 7 \
+  --cutoff 4 \
+  --window-size 41
+```
+
+The generated `summary.csv` includes model and campaign identity, quality
+status, achieved sampling rate, inference count, expected and detected active
+regions, threshold, power mean/variance, and energy mean/variance.
 
 ## More help
 
