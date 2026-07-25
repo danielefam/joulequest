@@ -92,7 +92,7 @@ if _torch_available:
     class TorchLinearModelBuilder(BaseModelBuilder):
         """Builds and saves a linear model for CPU/GPU inference. Uses PyTorch."""
         def __init__(self, input_size: int, output_size: int, 
-                    model_dir="Models/CPU/Linear"):
+                    model_dir="Models/CUDA/Linear"):
             assert isinstance(input_size, int) and input_size > 0, "Invalid input size"
             assert isinstance(output_size, int) and output_size > 0, "Invalid output size"
 

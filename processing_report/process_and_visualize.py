@@ -2,13 +2,18 @@
 # The following script was generated entirely by GPT-5.6 
 # and is intended solely for presentation purposes.
 import argparse
-import json
+import sys
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import pandas as pd
 
 import data_processing as dp
+
+try:
+    from .artifact_paths import load_measurement_metadata
+except ImportError:
+    from artifact_paths import load_measurement_metadata
 
 
 POWER_COLUMN = "EVM1 POWER Results (W)"
@@ -23,58 +28,46 @@ def build_parser():
     parser.add_argument(
         "--data-dir",
         type=Path,
-        default=REPOSITORY_ROOT / "measurements" / "Data" / "Linear",
+        default=REPOSITORY_ROOT / "measurements" / "runs" / "jetson_nano_base",
         help="Directory containing measurement CSV files.",
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=REPOSITORY_ROOT / "measurements" / "Plot" / "Linear",
+        default=REPOSITORY_ROOT / "measurements" / "Plot" / "jetson_nano_base",
         help="Directory receiving the summary CSV.",
     )
     parser.add_argument(
         "--manifest-dir",
         type=Path,
-        default=Path("measurements_jetson"),
-        help="Directory containing the JSON manifest for each CSV measurement.",
+        default=None,
+        help="Manifest directory; defaults to --data-dir for colocated artifacts.",
     )
-    parser.add_argument("--kernel-size", type=int, default=11)
-    parser.add_argument("--frequency", type=float, default=100.0)
-    parser.add_argument("--cutoff", type=float, default=4)
-    parser.add_argument("--window-size", type=int, default=30)
+    parser.add_argument("--kernel-size", type=int, default=7)
+    parser.add_argument(
+        "--frequency",
+        type=float,
+        default=None,
+        help="Sampling-rate override; defaults to each manifest's achieved rate.",
+    )
+    parser.add_argument("--cutoff", type=float, default=0.5)
+    parser.add_argument("--window-size", type=int, default=41)
     return parser
 
 
-def load_inferences_per_cycle(manifest_dir, csv_path):
-    manifest_path = dp.get_manifest_file_path(manifest_dir, csv_path)
-    if manifest_path is None:
-        return None
-
-    with manifest_path.open(encoding="utf-8") as manifest_file:
-        manifest = json.load(manifest_file)
-
-    try:
-        return manifest["plan"]["inferences_per_cycle"]
-    except KeyError as error:
-        raise KeyError(
-            f"Manifest {manifest_path} does not contain plan.inferences_per_cycle"
-        ) from error
-
-
-def process_file(csv_path, args, combined_axis):
+def process_file(csv_path, metadata, args, combined_axis):
     df = dp.load_data(csv_path)
     if POWER_COLUMN not in df.columns:
         raise ValueError(f"Missing column '{POWER_COLUMN}'")
 
-    inferences_per_cycle = load_inferences_per_cycle(
-        args.manifest_dir, csv_path
-    )
+    inferences_per_cycle = metadata["inferences_per_cycle"]
+    frequency = args.frequency or metadata["sampling_rate_hz"]
 
     df["median_filtered"] = dp.median_filter_data(
         df[POWER_COLUMN], args.kernel_size
     )
     df["lowpass_filtered"] = dp.lowpass_filter(
-        df["median_filtered"], args.cutoff, args.frequency
+        df["median_filtered"], args.cutoff, frequency
     )
     df["smoothed"] = dp.average_data(
         df["lowpass_filtered"], args.window_size
@@ -82,22 +75,14 @@ def process_file(csv_path, args, combined_axis):
 
     valid_smoothed = df["smoothed"].dropna()
     threshold = dp.get_threshold(valid_smoothed.to_numpy())
-    if inferences_per_cycle is None:
-        results = {
-            "power_avg_W": None,
-            "power_var_W2": None,
-            "energy_avg_J": None,
-            "energy_var_J2": None,
-        }
-    else:
-        results = dp.compute_means_variances(
-            df,
-            threshold,
-            sampling_interval=1 / args.frequency,
-            inferences_per_cycle=inferences_per_cycle,
-        )
+    results = dp.compute_means_variances(
+        df,
+        threshold,
+        sampling_interval=1 / frequency,
+        inferences_per_cycle=inferences_per_cycle,
+    )
 
-    time_seconds = df["Sample"] / args.frequency
+    time_seconds = df["Sample"] / frequency
     combined_axis.plot(
         time_seconds,
         df["smoothed"],
@@ -120,9 +105,16 @@ def process_file(csv_path, args, combined_axis):
     plt.close(figure)
 
     return {
+        "campaign_id": metadata["campaign_id"],
+        "model_path": metadata["model_path"],
+        "status": metadata["status"],
+        "quality_status": metadata["quality_status"],
         "file": str(csv_path.relative_to(args.data_dir)),
         "samples": len(df),
+        "sampling_rate_hz": frequency,
         "inferences_per_cycle": inferences_per_cycle,
+        "expected_cycles": metadata["expected_cycles"],
+        "detected_regions": results["region_count"],
         "threshold_W": threshold,
         "power_mean_W": results["power_avg_W"],
         "power_variance_W2": results["power_var_W2"],
@@ -133,18 +125,33 @@ def process_file(csv_path, args, combined_axis):
 
 def main():
     args = build_parser().parse_args()
+    manifest_dir = args.manifest_dir or args.data_dir
     args.output_dir.mkdir(parents=True, exist_ok=True)
     csv_files = sorted(args.data_dir.rglob("*.csv"))
     if not csv_files:
         raise FileNotFoundError(f"No CSV files found in {args.data_dir}")
 
     summary_rows = []
+    skipped_files = 0
     combined_figure, combined_axis = plt.subplots(figsize=(15, 7))
     for csv_path in csv_files:
+        metadata = load_measurement_metadata(manifest_dir, csv_path)
+        if metadata is None:
+            skipped_files += 1
+            print(
+                f"Skipping {csv_path}: no matching COMPLETE manifest",
+                file=sys.stderr,
+            )
+            continue
         try:
-            summary_rows.append(process_file(csv_path, args, combined_axis))
+            summary_rows.append(
+                process_file(csv_path, metadata, args, combined_axis)
+            )
         except (ValueError, IndexError) as error:
             raise ValueError(f"Could not process {csv_path}: {error}") from error
+
+    if not summary_rows:
+        raise RuntimeError("No CSV file has a matching COMPLETE manifest")
 
     combined_axis.set_title("Smoothed power comparison")
     combined_axis.set_xlabel("Time (s)")
@@ -162,6 +169,7 @@ def main():
         args.output_dir / "summary.csv", index=False
     )
     print(f"Processed {len(summary_rows)} files")
+    print(f"Skipped {skipped_files} incomplete or unpaired files")
     print(f"Summary saved to: {args.output_dir}")
 
 

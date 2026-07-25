@@ -7,7 +7,9 @@ import argparse
 import csv
 import json
 import math
+import signal
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,10 +37,48 @@ CONVERSION_TIMES_SECONDS = (
     8.244e-3,
 )
 AVERAGING_COUNTS = (1, 4, 16, 64, 128, 256, 512, 1024)
+CSV_FIELDNAMES = [
+    "Sample",
+    "Timestamp UTC",
+    "Elapsed Time (s)",
+    "I2C Address",
+    "Shunt Resistance (ohm)",
+    "Maximum Expected Current (A)",
+    "Current LSB (A)",
+    "Configuration Raw",
+    "Requested Interval (ms)",
+    "EVM1 SHUNT VOLTAGE Results (V)",
+    "EVM1 BUS VOLTAGE Results (V)",
+    "EVM1 CURRENT Results (A)",
+    "EVM1 POWER Results (W)",
+    "Calculated Current (A)",
+    "Calculated Power (W)",
+    "Shunt Raw",
+    "Bus Raw",
+    "Current Raw",
+    "Power Raw",
+    "Calibration Raw",
+]
 
 
 class ProtocolError(RuntimeError):
     """Raised when the TI-SCB does not return the documented JSON response."""
+
+
+def capture_event(event: str, campaign_id: str | None = None, **fields) -> dict:
+    payload = {
+        "event": event,
+        "monotonic_seconds": time.monotonic(),
+        "wall_time_utc": datetime.now(timezone.utc).isoformat(),
+        **fields,
+    }
+    if campaign_id is not None:
+        payload["campaign_id"] = campaign_id
+    return payload
+
+
+def print_json_event(payload: dict) -> None:
+    print(json.dumps(payload, sort_keys=True), flush=True)
 
 
 def int_auto(value: str) -> int:
@@ -191,7 +231,8 @@ class ScbSerial:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Stream INA226EVM samples through a TI-SCB USB serial port."
+        description="Stream INA226EVM samples through a TI-SCB USB serial port.",
+        formatter_class=lambda prog: argparse.HelpFormatter(prog, width=88),
     )
     parser.add_argument("--output", type=Path, required=True, help="Destination CSV")
     parser.add_argument(
@@ -217,6 +258,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--duration-s", type=float, default=0.0, help="0 disables the limit")
     parser.add_argument("--timeout-s", type=float, default=2.0)
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument("--campaign-id", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--json-events", action="store_true", help=argparse.SUPPRESS)
     return parser
 
 
@@ -238,36 +281,21 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("sample and duration limits cannot be negative; timeout must be positive")
 
 
-def run(args: argparse.Namespace) -> int:
+def run(
+    args: argparse.Namespace,
+    stop_requested=None,
+    event_sink=None,
+) -> int:
+    if stop_requested is None:
+        stop_requested = lambda: False
+
     validate_args(args)
     port = detect_port(args.port)
     output_mode = "w" if args.overwrite else "x"
     args.output.parent.mkdir(parents=True, exist_ok=True)
 
-    fieldnames = [
-        "Sample",
-        "Timestamp UTC",
-        "Elapsed Time (s)",
-        "I2C Address",
-        "Shunt Resistance (ohm)",
-        "Maximum Expected Current (A)",
-        "Current LSB (A)",
-        "Configuration Raw",
-        "Requested Interval (ms)",
-        "EVM1 SHUNT VOLTAGE Results (V)",
-        "EVM1 BUS VOLTAGE Results (V)",
-        "EVM1 CURRENT Results (A)",
-        "EVM1 POWER Results (W)",
-        "Calculated Current (A)",
-        "Calculated Power (W)",
-        "Shunt Raw",
-        "Bus Raw",
-        "Current Raw",
-        "Power Raw",
-        "Calibration Raw",
-    ]
-
     device = ScbSerial(port, args.baud, args.timeout_s)
+    summary = None
     try:
         device.set_device(args.address)
         configuration_raw = device.read_register(0x00)
@@ -333,19 +361,26 @@ def run(args: argparse.Namespace) -> int:
                 )
 
         with args.output.open(output_mode, newline="", encoding="utf-8", buffering=1) as output:
-            writer = csv.DictWriter(output, fieldnames=fieldnames)
+            writer = csv.DictWriter(output, fieldnames=CSV_FIELDNAMES)
             writer.writeheader()
             started = time.monotonic()
+            started_at_utc = datetime.now(timezone.utc).isoformat()
             next_deadline = started
             sample = 0
             first_sample_elapsed_s: float | None = None
             last_sample_elapsed_s: float | None = None
             deadline_misses = 0
+            stop_reason = "requested"
 
             while True:
+                if stop_requested():
+                    stop_reason = "requested"
+                    break
                 if args.samples and sample >= args.samples:
+                    stop_reason = "sample_limit"
                     break
                 if args.duration_s and time.monotonic() - started >= args.duration_s:
+                    stop_reason = "duration_limit"
                     break
 
                 shunt_raw = device.read_register(0x01)
@@ -393,6 +428,19 @@ def run(args: argparse.Namespace) -> int:
                 )
                 output.flush()
                 sample += 1
+                if sample == 1 and event_sink is not None:
+                    event_sink(
+                        capture_event(
+                            "ACQUISITION_READY",
+                            campaign_id=getattr(args, "campaign_id", None),
+                            status="RUNNING",
+                            port=port,
+                            csv_path=str(args.output.resolve()),
+                            started_at_utc=started_at_utc,
+                            first_sample_elapsed_seconds=first_sample_elapsed_s,
+                            sample_count=sample,
+                        )
+                    )
 
                 next_deadline += args.interval_ms / 1000
                 remaining = next_deadline - time.monotonic()
@@ -400,7 +448,7 @@ def run(args: argparse.Namespace) -> int:
                     time.sleep(remaining)
                 else:
                     deadline_misses += 1
-                    if deadline_misses == 1:
+                    if deadline_misses == 1 and not getattr(args, "json_events", False):
                         print(
                             "warning: the sampling loop passed the next requested "
                             "deadline; the logger reset it instead of building a "
@@ -409,7 +457,7 @@ def run(args: argparse.Namespace) -> int:
                         )
                     next_deadline = time.monotonic()
 
-        rate_text = "n/a"
+        achieved_sampling_rate_hz = None
         if (
             sample > 1
             and first_sample_elapsed_s is not None
@@ -417,27 +465,91 @@ def run(args: argparse.Namespace) -> int:
         ):
             elapsed_span_s = last_sample_elapsed_s - first_sample_elapsed_s
             if elapsed_span_s > 0:
-                rate_text = f"{(sample - 1) / elapsed_span_s:.6g} samples/s"
-        print(
-            f"Captured {sample} samples to {args.output}; achieved-rate={rate_text}; "
-            f"deadline-misses={deadline_misses}",
-            file=sys.stderr,
-        )
-        return 0
+                achieved_sampling_rate_hz = (sample - 1) / elapsed_span_s
+        summary = {
+            "status": "COMPLETE",
+            "port": port,
+            "csv_path": str(args.output.resolve()),
+            "started_at_utc": started_at_utc,
+            "capture_elapsed_seconds": time.monotonic() - started,
+            "sample_count": sample,
+            "first_sample_elapsed_seconds": first_sample_elapsed_s,
+            "last_sample_elapsed_seconds": last_sample_elapsed_s,
+            "achieved_sampling_rate_hz": achieved_sampling_rate_hz,
+            "deadline_misses": deadline_misses,
+            "stop_reason": stop_reason,
+        }
     finally:
         device.close()
+
+    summary["stopped_at_utc"] = datetime.now(timezone.utc).isoformat()
+    rate_text = "n/a"
+    if summary["achieved_sampling_rate_hz"] is not None:
+        rate_text = f"{summary['achieved_sampling_rate_hz']:.6g} samples/s"
+    print(
+        f"Captured {summary['sample_count']} samples to {args.output}; "
+        f"achieved-rate={rate_text}; "
+        f"deadline-misses={summary['deadline_misses']}",
+        file=sys.stderr,
+    )
+    if event_sink is not None:
+        event_sink(
+            capture_event(
+                "ACQUISITION_COMPLETE",
+                campaign_id=getattr(args, "campaign_id", None),
+                **summary,
+            )
+        )
+    return 0
 
 
 def main() -> int:
     args = build_parser().parse_args()
+    stop_event = threading.Event()
+    event_sink = print_json_event if args.json_events else None
+    previous_sigterm_handler = None
+    if args.json_events:
+        previous_sigterm_handler = signal.signal(
+            signal.SIGTERM,
+            lambda _signum, _frame: stop_event.set(),
+        )
     try:
-        return run(args)
+        return run(
+            args,
+            stop_requested=stop_event.is_set,
+            event_sink=event_sink,
+        )
     except KeyboardInterrupt:
+        if event_sink is not None:
+            event_sink(
+                capture_event(
+                    "ACQUISITION_FAILED",
+                    campaign_id=args.campaign_id,
+                    status="FAILED",
+                    csv_path=str(args.output.resolve()),
+                    failure_type="KeyboardInterrupt",
+                    failure_message="Capture interrupted by user",
+                )
+            )
         print("Capture stopped by user; completed rows remain in the CSV.", file=sys.stderr)
         return 130
     except (OSError, ValueError, ProtocolError, serial.SerialException) as error:
+        if event_sink is not None:
+            event_sink(
+                capture_event(
+                    "ACQUISITION_FAILED",
+                    campaign_id=args.campaign_id,
+                    status="FAILED",
+                    csv_path=str(args.output.resolve()),
+                    failure_type=type(error).__name__,
+                    failure_message=str(error),
+                )
+            )
         print(f"error: {error}", file=sys.stderr)
         return 1
+    finally:
+        if previous_sigterm_handler is not None:
+            signal.signal(signal.SIGTERM, previous_sigterm_handler)
 
 
 if __name__ == "__main__":

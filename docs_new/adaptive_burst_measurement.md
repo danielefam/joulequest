@@ -1,6 +1,6 @@
 # Adaptive Clean-Burst Measurement Protocol
 
-**Implementation status:** first runner-side implementation, 2026-07-12
+**Implementation status:** automated direct-serial acquisition, 2026-07-23
 **Validated priority:** PyTorch CPU/CUDA
 **Compatibility only:** Edge TPU remains available but is not part of the current validation campaign.
 
@@ -100,7 +100,69 @@ Preferred policy:
 
 A fixed campaign rate keeps filter configuration and measurements comparable. Dynamic sampling rates should be introduced only if bench validation proves that no single fixed rate supports both the fastest and slowest workloads.
 
-## 6. Manual acquisition sequence
+## 6. Automated acquisition sequence
+
+Use `automated_measurement.py` on the PC physically connected to the TI-SCB.
+The inference host is selected with `--runner-host` and reached through
+non-interactive SSH. No interaction is required after the command starts.
+
+1. The PC opens an SSH process running `run_manager.py --stdio_acquisition` on
+  the Jetson.
+2. The Jetson creates the runner and loads or builds the selected model.
+3. The Jetson executes warm-up, cooldown, and calibration while acquisition is
+   stopped.
+4. The Jetson selects `inferences_per_cycle`, writes its manifest in `READY`
+   state, and emits `READY` followed by `ACQUISITION_START_REQUEST`.
+5. The PC launches its local `ina226_serial_logger.py` child process.
+6. The PC configures and verifies the INA226 calibration register, creates the
+  CSV, flushes the first complete sample, and acknowledges the Jetson.
+7. Only after that acknowledgement does the Jetson begin
+  `leading_idle_seconds`.
+8. The Jetson executes measured cycles with idle intervals only between cycles.
+9. The Jetson records `trailing_idle_seconds`, then an additional idle
+  `safety_margin_seconds`.
+10. The Jetson emits `ACQUISITION_STOP_REQUEST` and waits. The PC requests
+   cooperative logger shutdown and waits for CSV and serial-port cleanup.
+11. The PC acknowledges the stopped logger. Only then does the Jetson write its
+   final manifest and send it through SSH.
+12. The PC saves that manifest beside the CSV and prints the final
+  `AUTOMATED_MEASUREMENT_RESULT` JSON record.
+13. After the local manifest has been saved atomically, the PC removes the
+  remote manifest to conserve storage on the inference board.
+
+```bash
+python automated_measurement.py \
+  --connection-config measurement_hosts.local.json \
+  --backend cuda \
+  --model Models/CUDA/Linear/Linear_8192_8192.pt \
+  --port /dev/serial/by-id/usb-Texas_Instruments_Generic_Bulk_Device_12345678-if01 \
+  --output-directory measurements/runs \
+  --shunt-ohms 0.012 \
+  --max-expected-current-a 5.0 \
+  --sampling_rate_hz 10
+```
+
+The automated command derives `interval_ms = 1000 / sampling_rate_hz`; planning
+and acquisition therefore cannot silently use different requested rates. The
+observed rate and deadline misses are recorded separately because serial and
+sensor timing can prevent the requested rate from being achieved.
+
+The Jetson needs `run_manager.py`, `runner.py`, and `base_runner.py`. The PC
+needs `automated_measurement.py` and `ina226_serial_logger.py`. The TI serial
+device path and local output directory are PC paths; the model, remote working
+directory, and remote manifest directory are Jetson paths. SSH must be
+non-interactive; use repeatable `--ssh-option` arguments for options such as a
+custom identity file. Store host-specific settings in the ignored
+`measurement_hosts.local.json`, created from `measurement_hosts.example.json`.
+
+The remote manifest is a transfer/recovery file rather than the authoritative
+archive. It is deleted only after the same campaign ID has been persisted in
+the PC output directory. Use `--keep-remote-manifest` when a board-side copy is
+needed for diagnostics. A failed local write or failed cleanup SSH command
+leaves the remote file in place for recovery and does not overwrite the local
+measurement result.
+
+### Manual fallback
 
 Use `--wait_for_acquisition` while acquisition still uses the TI GUI.
 
@@ -121,8 +183,8 @@ Example CPU campaign with automatic count:
 
 ```bash
 python run_manager.py \
-  --backend cpu \
-  --model Models/CPU/Linear/Linear_64_64.pt \
+  --backend cuda \
+  --model Models/CUDA/Linear/Linear_64_64.pt \
   --number_of_cycles 5 \
   --sleep_time 5 \
   --sampling_rate_hz 10 \
@@ -149,7 +211,10 @@ $$
 N_{capture}=\left\lceil T_{capture}f_s\right\rceil
 $$
 
-The default idle guards are 5 s before and after the measured cycles, with a 2 s acquisition safety margin.
+The default idle guards are 5 s before and after the measured cycles, with a 2 s
+acquisition safety margin. Automated acquisition records that safety margin as
+additional idle baseline before stopping. The manual workflow leaves margin
+handling to the operator.
 
 ## 8. Structured output and manifest
 
@@ -163,7 +228,18 @@ Console events are one-line JSON records:
 
 Each event contains monotonic and UTC timestamps. Each `BURST_END` reports requested count, executed count, elapsed time, estimated INA226 samples, and quality flags.
 
-The default manifest directory is `measurement_manifests/`. A manifest distinguishes:
+Automated artifacts are colocated and use the campaign ID as their exact stem:
+
+```text
+<output-directory>/<campaign_id>.csv
+<output-directory>/<campaign_id>.json
+```
+
+The manifest keeps `schema_version: 1` and adds an `acquisition` object with the
+authoritative CSV path, requested serial/sensor settings, actual port, readiness
+and completion timestamps, capture duration, sample count, achieved rate,
+deadline misses, stop reason, status, and failure details. A manifest also
+distinguishes:
 
 - excluded warm-up work;
 - excluded calibration work;
@@ -173,6 +249,21 @@ The default manifest directory is `measurement_manifests/`. A manifest distingui
 - campaign status and quality flags.
 
 `UNDER_RESOLVED` means an actual burst was shorter than the minimum sample requirement. `DURATION_ANOMALY` means its duration was less than half or more than twice the calibration estimate. Such campaigns complete with `quality_status: REVIEW` and must not enter the final energy lookup table without investigation.
+
+`ACQUISITION_FAILED` means the workload completed but the INA226 capture did not.
+The manifest remains `COMPLETE` with `quality_status: REVIEW`, any partial CSV is
+retained, and the automated command exits with code 2. Workload failures retain
+completed cycle records and produce a `FAILED` manifest only after logger
+cleanup.
+
+Automated command exit codes are:
+
+| Code | Meaning |
+| ---: | --- |
+| `0` | Workload and acquisition completed cleanly |
+| `2` | Workload completed, but acquisition requires review or failed |
+| `1` | Workload or orchestration failed |
+| `130` | User interruption after cleanup |
 
 ## 9. CLI parameter reference
 
@@ -195,16 +286,20 @@ The default manifest directory is `measurement_manifests/`. A manifest distingui
 | `leading_idle_seconds`           |                s |                         5 | Baseline only                | Idle baseline before first useful burst                   |
 | `trailing_idle_seconds`          |                s |                         5 | Baseline only                | Idle baseline after final useful burst                    |
 | `safety_margin_seconds`          |                s |                         2 | Acquisition only             | Extra requested capture capacity                          |
-| `wait_for_acquisition`           |             flag |                     false | No                           | Pause at`READY` for manual GUI start                    |
-| `manifest_directory`             |             path | `measurement_manifests` | N/A                          | JSON campaign metadata destination                        |
+| `wait_for_acquisition`           |             flag |                     false | No                           | Pause at `READY` for manual GUI start                     |
+| `manifest_directory`             |             path |                      none | N/A                          | Manual-run JSON campaign metadata destination             |
 
 Every burst receives fresh parameters and input; this is part of the runner
 protocol rather than a command-line option. The preparation is excluded from
 the burst timer, while the complete sequence of forward passes is included.
 
-## 10. Current limitations and next implementation step
+## 10. Current limitations
 
-- The JSON event timestamps are generated on the target host; they are not yet injected into the TI GUI CSV.
-- The CSV processing path still needs to consume each campaign manifest and replace its historical hard-coded energy divisor with actual executed inference counts.
-- Direct INA226 control and event-defined segmentation are future phases.
+- Event timestamps are generated on the Jetson while CSV timestamps are
+  generated on the PC. They are not assumed to share a monotonic clock; pairing
+  uses the exact campaign-ID stem and explicit SSH handshakes instead.
+- CSV processing uses `plan.inferences_per_cycle`, but active-region detection
+  remains threshold-based rather than event-indexed.
+- Direct acquisition does not automatically segment CSV rows by burst event;
+  analysis still identifies active regions from the trace and manifest timing.
 - TPU execution follows the common runner API but has not been validated in this implementation phase.
