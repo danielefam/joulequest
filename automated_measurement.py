@@ -22,7 +22,7 @@ class AcquisitionProcessError(RuntimeError):
 
 
 class RemoteExperimentError(RuntimeError):
-    """Raised when the Jetson experiment cannot be controlled over SSH."""
+    """Raised when the remote board experiment cannot be controlled over SSH."""
 
 
 CONNECTION_CONFIG_KEYS = {
@@ -37,7 +37,7 @@ CONNECTION_CONFIG_KEYS = {
 CONNECTION_DEFAULTS = {
     "remote_directory": ".",
     "remote_python": "python3",
-    "remote_manifest_directory": "measurements_jetson",
+    "remote_manifest_directory": "measurements_board",
     "ssh_connect_timeout_s": 10.0,
 }
 
@@ -381,7 +381,7 @@ class Ina226ProcessController:
 
 
 class SshExperimentController:
-    """Run RunManager on the Jetson while acquisition remains local."""
+    """Run RunManager on the remote board while acquisition remains local."""
 
     def __init__(
         self,
@@ -674,7 +674,7 @@ class SshExperimentController:
             manifest = event.get("manifest")
             if not isinstance(manifest, dict):
                 raise RemoteExperimentError(
-                    "Jetson returned an invalid manifest payload"
+                    "Remote board returned an invalid manifest payload"
                 )
             self.manifest = manifest
         else:
@@ -694,7 +694,7 @@ class SshExperimentController:
             raise RemoteExperimentError("SSH process pipes were not created")
         self.reader_thread = threading.Thread(
             target=self._read_stdout,
-            name="jetson-event-reader",
+                name="remote-board-event-reader",
             daemon=True,
         )
         self.reader_thread.start()
@@ -710,7 +710,7 @@ class SshExperimentController:
                     raw_line = ""
                 if isinstance(raw_line, Exception):
                     raise RemoteExperimentError(
-                        f"Failed to read Jetson stdout: {raw_line}"
+                        f"Failed to read remote board stdout: {raw_line}"
                     ) from raw_line
                 if raw_line is None:
                     reader_finished = True
@@ -719,14 +719,18 @@ class SshExperimentController:
                     try:
                         event = json.loads(line)
                     except json.JSONDecodeError:
-                        print(f"[jetson] {line}", file=sys.stderr, flush=True)
+                        print(
+                            f"[remote-board] {line}",
+                            file=sys.stderr,
+                            flush=True,
+                        )
                     else:
                         received_event = True
                         self._handle_event(event, raw_line)
 
                 if not received_event and self.monotonic_fn() >= startup_deadline:
                     raise RemoteExperimentError(
-                        "Timed out waiting for the first Jetson event"
+                        "Timed out waiting for the first remote board event"
                     )
                 if reader_finished and self.process.poll() is not None:
                     break
@@ -736,22 +740,23 @@ class SshExperimentController:
                 self.manifest = self._fetch_remote_manifest()
             if self.manifest is None:
                 raise RemoteExperimentError(
-                    "Jetson exited without returning its JSON manifest "
+                    "Remote board exited without returning its JSON manifest "
                     f"(SSH exit code {return_code})"
                 )
             manifest_status = self.manifest.get("status")
             if manifest_status not in ("COMPLETE", "FAILED"):
                 raise RemoteExperimentError(
-                    f"Jetson returned invalid manifest status {manifest_status!r}"
+                    "Remote board returned invalid manifest status "
+                    f"{manifest_status!r}"
                 )
             if manifest_status == "COMPLETE" and return_code != 0:
                 raise RemoteExperimentError(
-                    "Jetson reported a complete campaign but SSH exited with "
+                    "Remote board reported a complete campaign but SSH exited with "
                     f"code {return_code}"
                 )
             if manifest_status == "FAILED" and return_code == 0:
                 raise RemoteExperimentError(
-                    "Jetson returned a failed manifest with SSH exit code 0"
+                    "Remote board returned a failed manifest with SSH exit code 0"
                 )
             return self.manifest
         finally:
@@ -779,7 +784,7 @@ class SshExperimentController:
 def persist_local_manifest(manifest, output_directory):
     campaign_id = manifest.get("campaign_id")
     if not campaign_id:
-        raise RemoteExperimentError("Jetson manifest has no campaign_id")
+        raise RemoteExperimentError("Remote board manifest has no campaign_id")
     output_directory = Path(output_directory)
     output_directory.mkdir(parents=True, exist_ok=True)
     path = output_directory / f"{campaign_id}.json"

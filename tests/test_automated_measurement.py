@@ -348,7 +348,7 @@ class SshExperimentControllerTests(unittest.TestCase):
             "runner_host": "bench@inference-host",
             "remote_directory": "/srv/benchmark",
             "remote_python": "python3",
-            "remote_manifest_directory": "measurements_jetson",
+            "remote_manifest_directory": "measurements_board",
             "ssh_options": ["ProxyJump=relay@jump-host"],
             "acquisition_controller": acquisition,
             "startup_timeout_seconds": 1.0,
@@ -496,7 +496,7 @@ class SshExperimentControllerTests(unittest.TestCase):
         self.assertEqual(returned, failed_manifest)
         fetch.assert_called_once()
         self.assertIn(
-            "measurements_jetson/campaign-fallback.json",
+            "measurements_board/campaign-fallback.json",
             fetch.call_args.args[0][-1],
         )
 
@@ -510,7 +510,7 @@ class SshExperimentControllerTests(unittest.TestCase):
         self.assertIn("ProxyJump=relay@jump-host", command)
         self.assertEqual(command[-2], "bench@inference-host")
         self.assertIn(
-            "rm -f -- measurements_jetson/campaign-cleanup.json",
+            "rm -f -- measurements_board/campaign-cleanup.json",
             command[-1],
         )
 
