@@ -118,19 +118,19 @@ Choose the backend with `--backend`:
 
 These are the most useful settings:
 
-| Setting | Meaning | Default |
-| --- | --- | --- |
-| `--number_of_cycles` | Number of real measurement cycles | `5` |
-| `--sleep_time` | Pause, in seconds, between cycles | `10` |
-| `--target_burst_seconds` | Desired duration, in seconds, of each real cycle | `10` |
-| `--sampling_rate_hz` | INA226 samples per second | `10` |
-| `--wait_for_acquisition` | Stops and waits for you to start manual INA226 recording | off |
-| `--runner-host` | SSH destination running inference | none (single-host fallback) |
-| `--jump-host` | SSH host used to reach the inference host | none |
-| `--connection-config` | Ignored JSON containing SSH/remote settings | none |
-| `--remote-directory` | Jetson directory containing `run_manager.py` | `.` |
-| `--remote-manifest-directory` | Manifest directory on the Jetson | `measurements_jetson` |
-| `--keep-remote-manifest` | Keep the Jetson copy after local persistence | off |
+| Setting                         | Meaning                                                  | Default                     |
+| ------------------------------- | -------------------------------------------------------- | --------------------------- |
+| `--number_of_cycles`          | Number of real measurement cycles                        | `5`                       |
+| `--sleep_time`                | Pause, in seconds, between cycles                        | `10`                      |
+| `--target_burst_seconds`      | Desired duration, in seconds, of each real cycle         | `10`                      |
+| `--sampling_rate_hz`          | INA226 samples per second                                | `10`                      |
+| `--wait_for_acquisition`      | Stops and waits for you to start manual INA226 recording | off                         |
+| `--runner-host`               | SSH destination running inference                        | none (single-host fallback) |
+| `--jump-host`                 | SSH host used to reach the inference host                | none                        |
+| `--connection-config`         | Ignored JSON containing SSH/remote settings              | none                        |
+| `--remote-directory`          | Jetson directory containing`run_manager.py`            | `.`                       |
+| `--remote-manifest-directory` | Manifest directory on the Jetson                         | `measurements_jetson`     |
+| `--keep-remote-manifest`      | Keep the Jetson copy after local persistence             | off                         |
 
 The automated command accepts the same adaptive workload controls but does not
 accept `--wait_for_acquisition`, logger duration/sample limits, or overwrite.
