@@ -428,7 +428,7 @@ def plot_measurement(result, output_path, title=None):
         samples["time_s"],
         samples["power_raw_W"],
         color="0.72",
-        linewidth=0.35,
+        linewidth=0.15,
         alpha=0.55,
         label="Raw power",
     )
@@ -436,7 +436,7 @@ def plot_measurement(result, output_path, title=None):
         samples["time_s"],
         samples["power_smoothed_W"],
         color="#143642",
-        linewidth=1.0,
+        linewidth=0.35,
         label="Cleaned power",
     )
     outliers = samples[samples["is_outlier"]]
@@ -447,7 +447,7 @@ def plot_measurement(result, output_path, title=None):
             color="#c44900",
             marker="x",
             s=13,
-            linewidths=0.7,
+            linewidths=0.4,
             label="Rejected outlier",
             zorder=4,
         )
@@ -466,7 +466,7 @@ def plot_measurement(result, output_path, title=None):
         result.summary["threshold_W"],
         color="#9b2226",
         linestyle="--",
-        linewidth=0.8,
+        linewidth=0.4,
         label="Signal threshold",
     )
     axis.set(
@@ -475,7 +475,7 @@ def plot_measurement(result, output_path, title=None):
         ylabel="Power (W)",
     )
     axis.set_xlim(samples["time_s"].iloc[0], samples["time_s"].iloc[-1])
-    axis.grid(True, color="0.88", linewidth=0.6)
+    axis.grid(True, color="0.88", linewidth=0.3)
     handles, labels = axis.get_legend_handles_labels()
     handles.extend(
         [
