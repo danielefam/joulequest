@@ -8,12 +8,15 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import pandas as pd
 
-import data_processing as dp
+try:
+    from . import data_processing_new as dp
+except ImportError:
+    import data_processing_new as dp
 
 try:
-    from .artifact_paths import load_measurement_metadata
+    from .artifact_paths import get_manifest_file_path, load_measurement_metadata
 except ImportError:
-    from artifact_paths import load_measurement_metadata
+    from artifact_paths import get_manifest_file_path, load_measurement_metadata
 
 
 POWER_COLUMN = "EVM1 POWER Results (W)"
@@ -50,59 +53,49 @@ def build_parser():
         default=None,
         help="Sampling-rate override; defaults to each manifest's achieved rate.",
     )
+    parser.add_argument(
+        "--max-clock-uncertainty-fraction",
+        type=float,
+        default=0.10,
+        help="Maximum synchronized-clock uncertainty as a sample-period fraction.",
+    )
     parser.add_argument("--cutoff", type=float, default=0.5)
     parser.add_argument("--window-size", type=int, default=41)
     return parser
 
 
 def process_file(csv_path, metadata, args, combined_axis):
-    df = dp.load_data(csv_path)
-    if POWER_COLUMN not in df.columns:
-        raise ValueError(f"Missing column '{POWER_COLUMN}'")
-
-    inferences_per_cycle = metadata["inferences_per_cycle"]
-    frequency = args.frequency or metadata["sampling_rate_hz"]
-
-    df["median_filtered"] = dp.median_filter_data(
-        df[POWER_COLUMN], args.kernel_size
+    manifest_path = get_manifest_file_path(
+        args.manifest_dir or args.data_dir,
+        csv_path,
     )
-    df["lowpass_filtered"] = dp.lowpass_filter(
-        df["median_filtered"], args.cutoff, frequency
+    result = dp.process_measurement(
+        csv_path,
+        manifest_path=manifest_path,
+        config=dp.ProcessingConfig(
+            sampling_rate_hz=args.frequency,
+            max_clock_uncertainty_fraction=(
+                args.max_clock_uncertainty_fraction
+            ),
+        ),
     )
-    df["smoothed"] = dp.average_data(
-        df["lowpass_filtered"], args.window_size
-    )
+    samples = result.samples
+    regions = result.regions
+    frequency = result.summary["sampling_rate_hz"]
 
-    valid_smoothed = df["smoothed"].dropna()
-    threshold = dp.get_threshold(valid_smoothed.to_numpy())
-    results = dp.compute_means_variances(
-        df,
-        threshold,
-        sampling_interval=1 / frequency,
-        inferences_per_cycle=inferences_per_cycle,
-    )
-
-    time_seconds = df["Sample"] / frequency
+    time_seconds = samples["time_s"]
     combined_axis.plot(
         time_seconds,
-        df["smoothed"],
+        samples["power_smoothed_W"],
         label=csv_path.stem,
-        linewidth=0.5,
+        linewidth=0.2,
     )
 
-    figure, axis = plt.subplots(figsize=(14, 5))
-    axis.plot(time_seconds, df[POWER_COLUMN], alpha=0.3, linewidth=0.2, label="Raw power")
-    axis.plot(time_seconds, df["smoothed"], linewidth=0.3, label="Smoothed power")
-    axis.axhline(threshold, color="tab:red", linestyle="--", linewidth=0.5, label="Otsu threshold")
-    axis.set_title(csv_path.stem)
-    axis.set_xlabel("Time (s)")
-    axis.set_ylabel("Power (W)")
-    axis.grid(True, alpha=0.3)
-    axis.legend()
-    figure.tight_layout()
-    figure.savefig(args.output_dir / f"{csv_path.stem}.pdf", format="pdf")
-    plt.show()
-    plt.close(figure)
+    dp.plot_measurement(result, args.output_dir / f"{csv_path.stem}.pdf")
+
+    power_offsets = regions["power_offset_W"]
+    energies = regions["energy_per_inference_J"]
+    idle_baseline = result.summary["idle_baseline"]
 
     return {
         "campaign_id": metadata["campaign_id"],
@@ -110,22 +103,45 @@ def process_file(csv_path, metadata, args, combined_axis):
         "status": metadata["status"],
         "quality_status": metadata["quality_status"],
         "file": str(csv_path.relative_to(args.data_dir)),
-        "samples": len(df),
+        "samples": len(samples),
         "sampling_rate_hz": frequency,
-        "inferences_per_cycle": inferences_per_cycle,
+        "inferences_per_cycle": metadata["inferences_per_cycle"],
         "expected_cycles": metadata["expected_cycles"],
-        "detected_regions": results["region_count"],
-        "threshold_W": threshold,
-        "power_mean_W": results["power_avg_W"],
-        "power_variance_W2": results["power_var_W2"],
-        "energy_mean_J": results["energy_avg_J"],
-        "energy_variance_J2": results["energy_var_J2"],
+        "detected_regions": result.summary["active_region_count"],
+        "threshold_W": result.summary["threshold_W"],
+        "power_mean_W": power_offsets.mean(),
+        "power_variance_W2": power_offsets.var(ddof=1),
+        "energy_mean_J": energies.mean(),
+        "energy_variance_J2": energies.var(ddof=1),
+        "outlier_count": result.summary["outlier_count"],
+        "active_classification_source": result.summary[
+            "active_classification_source"
+        ],
+        "clock_alignment_status": result.summary["clock_alignment_status"],
+        "clock_alignment_uncertainty_s": result.summary[
+            "clock_alignment_uncertainty_seconds"
+        ],
+        "clock_alignment_threshold_s": result.summary[
+            "clock_alignment_threshold_seconds"
+        ],
+        "clock_alignment_fallback_reason": result.summary[
+            "clock_alignment_fallback_reason"
+        ],
+        "idle_baseline_source": idle_baseline["source"],
+        "idle_baseline_power_W": idle_baseline["power_median_W"],
+        "idle_baseline_mad_W": idle_baseline["power_mad_W"],
+        "idle_baseline_samples": idle_baseline["sample_count"],
+        "idle_baseline_fallback_reason": idle_baseline["fallback_reason"],
+        "preparation_classification_source": result.summary[
+            "preparation_classification_source"
+        ],
     }
 
 
 def main():
     args = build_parser().parse_args()
     manifest_dir = args.manifest_dir or args.data_dir
+    args.manifest_dir = manifest_dir
     args.output_dir.mkdir(parents=True, exist_ok=True)
     csv_files = sorted(args.data_dir.rglob("*.csv"))
     if not csv_files:

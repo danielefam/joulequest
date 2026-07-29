@@ -13,6 +13,7 @@ from run_manager import (
     RunManager,
     StdioAcquisitionController,
     calculate_capture_plan,
+    calculate_clock_sync_sample,
     calculate_inference_count,
     calculate_required_burst_seconds,
 )
@@ -121,6 +122,14 @@ class FakeAcquisitionController:
         self.active = True
         return {"status": "RUNNING", "sample_count": 1}
 
+    def synchronize_clock(self, round_name, exchange_count):
+        self.timeline.append(("sync", round_name))
+        return {
+            "status": "UNAVAILABLE",
+            "round": round_name,
+            "requested_exchange_count": exchange_count,
+        }
+
     def check_health(self):
         self.timeline.append(("health", None))
         return None
@@ -133,9 +142,21 @@ class FakeAcquisitionController:
 
 
 class PlanningTests(unittest.TestCase):
+    def test_clock_sync_sample_calculates_offset_rtt_and_uncertainty(self):
+        sample = calculate_clock_sync_sample(1.0, 11.002, 11.003, 1.005)
+
+        self.assertAlmostEqual(
+            sample["controller_minus_runner_seconds"], 10.0
+        )
+        self.assertAlmostEqual(sample["round_trip_seconds"], 0.004)
+        self.assertAlmostEqual(sample["uncertainty_seconds"], 0.002)
+        self.assertAlmostEqual(
+            sample["runner_midpoint_monotonic_seconds"], 1.0025
+        )
+
     def test_required_duration_respects_time_and_sample_constraints(self):
-        self.assertEqual(calculate_required_burst_seconds(2.0, 50, 10.0), 5.0)
-        self.assertEqual(calculate_required_burst_seconds(10.0, 50, 10.0), 10.0)
+        self.assertEqual(calculate_required_burst_seconds(2.0, 50, 10.0), 6.0)
+        self.assertEqual(calculate_required_burst_seconds(10.0, 50, 10.0), 12.0)
 
     def test_inference_count_rounds_up(self):
         self.assertEqual(
@@ -145,7 +166,7 @@ class PlanningTests(unittest.TestCase):
                 min_active_samples=20,
                 sampling_rate_hz=10.0,
             ),
-            667,
+            800,
         )
 
     def test_capture_plan_counts_only_inter_cycle_sleeps(self):
@@ -163,6 +184,59 @@ class PlanningTests(unittest.TestCase):
 
 
 class StdioAcquisitionControllerTests(unittest.TestCase):
+    def test_clock_sync_selects_the_minimum_round_trip_exchange(self):
+        input_stream = io.StringIO(
+            json.dumps(
+                {
+                    "command": "CLOCK_SYNC_RESPONSE",
+                    "campaign_id": "campaign-123",
+                    "request_id": "pre:1",
+                    "result": {
+                        "controller_received_monotonic_seconds": 11.004,
+                        "controller_sent_monotonic_seconds": 11.005,
+                    },
+                }
+            )
+            + "\n"
+            + json.dumps(
+                {
+                    "command": "CLOCK_SYNC_RESPONSE",
+                    "campaign_id": "campaign-123",
+                    "request_id": "pre:2",
+                    "result": {
+                        "controller_received_monotonic_seconds": 12.002,
+                        "controller_sent_monotonic_seconds": 12.003,
+                    },
+                }
+            )
+            + "\n"
+        )
+        monotonic_values = iter([1.0, 1.009, 2.0, 2.005])
+        output_stream = io.StringIO()
+        controller = StdioAcquisitionController(
+            input_stream,
+            output_stream,
+            monotonic_fn=lambda: next(monotonic_values),
+        )
+        controller.describe("campaign-123", {})
+
+        result = controller.synchronize_clock("pre", 2)
+
+        self.assertEqual(result["status"], "COMPLETE")
+        self.assertEqual(result["valid_exchange_count"], 2)
+        self.assertEqual(result["selected_sample"]["request_id"], "pre:2")
+        self.assertAlmostEqual(
+            result["selected_sample"]["controller_minus_runner_seconds"],
+            10.0,
+        )
+        requests = [
+            json.loads(line) for line in output_stream.getvalue().splitlines()
+        ]
+        self.assertEqual(
+            [request["request_id"] for request in requests],
+            ["pre:1", "pre:2"],
+        )
+
     def test_json_handshake_uses_campaign_id_and_preserves_results(self):
         input_stream = io.StringIO(
             json.dumps(
@@ -192,7 +266,7 @@ class StdioAcquisitionControllerTests(unittest.TestCase):
         started = controller.start()
         stopped = controller.stop()
 
-        self.assertEqual(description["control_protocol"], "stdio_json_v1")
+        self.assertEqual(description["control_protocol"], "stdio_json_v2")
         self.assertEqual(description["acquisition_role"], "controller_host")
         self.assertNotIn("acquisition_host", description)
         self.assertEqual(started["status"], "RUNNING")
@@ -230,6 +304,9 @@ class StdioAcquisitionControllerTests(unittest.TestCase):
             calibration_target_seconds=0.1,
             calibration_repetitions=2,
             max_relative_mad=0.15,
+            burst_duration_margin=1.2,
+            clock_sync_exchanges=10,
+            max_clock_uncertainty_fraction=0.10,
             max_calibration_inferences=1000,
             leading_idle_seconds=0.0,
             trailing_idle_seconds=0.0,
@@ -303,9 +380,12 @@ class RunManagerTests(unittest.TestCase):
             self.assertTrue(runner.prepared)
             self.assertTrue(runner.closed)
             self.assertEqual(manifest["status"], "COMPLETE")
+            self.assertEqual(manifest["schema_version"], 2)
             self.assertEqual(manifest["warmup"]["executed_inferences"], 5)
             self.assertEqual(manifest["calibration"]["discarded_batches"], 1)
-            self.assertEqual(manifest["plan"]["inferences_per_cycle"], 100)
+            self.assertEqual(manifest["plan"]["inferences_per_cycle"], 120)
+            self.assertEqual(manifest["plan"]["required_burst_seconds"], 1.2)
+            self.assertEqual(manifest["plan"]["burst_duration_margin"], 1.2)
             self.assertEqual(
                 manifest["workload_policy"]["parameters"],
                 "fresh_per_burst",
@@ -315,14 +395,14 @@ class RunManagerTests(unittest.TestCase):
                 "fresh_per_burst",
             )
             self.assertEqual(
-                manifest["measurement"]["total_executed_inferences"], 200
+                manifest["measurement"]["total_executed_inferences"], 240
             )
             self.assertEqual(len(manifest["measurement"]["cycles"]), 2)
 
             # Calls: one warm-up, one sizing pilot, four calibration batches,
             # and exactly two measured cycles.
             self.assertEqual(len(runner.calls), 8)
-            self.assertEqual(runner.calls[-2:], [100, 100])
+            self.assertEqual(runner.calls[-2:], [120, 120])
             self.assertEqual(runner.burst_preparations, len(runner.calls))
             self.assertEqual(len(set(map(id, runner.parameter_states))), 8)
             self.assertEqual(len(set(map(id, runner.input_states))), 8)
@@ -338,15 +418,20 @@ class RunManagerTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "minimum active samples"):
                 manager.execute()
 
-    def test_unstable_calibration_is_rejected(self):
+    def test_unstable_calibration_is_retained_for_review(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             manager = self._manager(
                 temp_dir,
                 runner_cls=UnstableFakeRunner,
                 max_relative_mad=0.01,
             )
-            with self.assertRaisesRegex(RuntimeError, "did not stabilize"):
-                manager.execute()
+            manifest = manager.execute()
+
+            self.assertEqual(manifest["status"], "COMPLETE")
+            self.assertEqual(manifest["quality_status"], "REVIEW")
+            self.assertIn("CALIBRATION_UNSTABLE", manifest["quality_flags"])
+            self.assertFalse(manifest["calibration"]["is_stable"])
+            self.assertEqual(len(manifest["measurement"]["cycles"]), 2)
 
     def test_all_lifecycle_events_are_emitted_in_order(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -403,17 +488,81 @@ class RunManagerTests(unittest.TestCase):
             self.assertEqual(controller.stop_calls, 1)
             ready_write = timeline.index(("write", "READY"))
             start = timeline.index(("start", None))
+            pre_sync = timeline.index(("sync", "pre_acquisition"))
             leading_idle = timeline.index(("sleep", 1.0))
             trailing_idle = timeline.index(("sleep", 2.0))
             safety_margin = timeline.index(("sleep", 3.0))
             stop = timeline.index(("stop", None))
+            post_sync = timeline.index(("sync", "post_acquisition"))
             complete_write = timeline.index(("write", "COMPLETE"))
             self.assertLess(ready_write, start)
+            self.assertLess(pre_sync, start)
             self.assertLess(start, leading_idle)
             self.assertLess(leading_idle, trailing_idle)
             self.assertLess(trailing_idle, safety_margin)
             self.assertLess(safety_margin, stop)
+            self.assertLess(stop, post_sync)
             self.assertLess(stop, complete_write)
+
+    def test_clock_alignment_translates_bursts_into_logger_elapsed_time(self):
+        manager = self._manager(
+            None,
+            sampling_rate_hz=100.0,
+            max_clock_uncertainty_fraction=0.10,
+        )
+        manifest = {
+            "acquisition": {
+                "started_monotonic_seconds": 1090.0,
+                "capture_elapsed_seconds": 30.0,
+            },
+            "measurement": {
+                "cycles": [
+                    {
+                        "start_event": {"monotonic_seconds": 100.0},
+                        "end_event": {"monotonic_seconds": 102.0},
+                    }
+                ]
+            },
+        }
+
+        def sync_round(round_name, midpoint, offset, uncertainty):
+            return {
+                "status": "COMPLETE",
+                "round": round_name,
+                "method": "minimum_round_trip",
+                "selected_sample": {
+                    "runner_midpoint_monotonic_seconds": midpoint,
+                    "controller_minus_runner_seconds": offset,
+                    "round_trip_seconds": 2 * uncertainty,
+                    "uncertainty_seconds": uncertainty,
+                },
+            }
+
+        alignment = manager._finalize_clock_alignment(
+            manifest,
+            sync_round("pre_acquisition", 90.0, 1000.0, 0.0005),
+            sync_round("post_acquisition", 110.0, 1000.1, 0.0005),
+        )
+
+        cycle = manifest["measurement"]["cycles"][0]
+        self.assertTrue(alignment["classification_eligible"])
+        self.assertIsNone(alignment["fallback_reason"])
+        self.assertAlmostEqual(
+            cycle["start_event"]["aligned_elapsed_seconds"], 10.05
+        )
+        self.assertAlmostEqual(
+            cycle["end_event"]["aligned_elapsed_seconds"], 12.06
+        )
+
+        alignment = manager._finalize_clock_alignment(
+            manifest,
+            sync_round("pre_acquisition", 90.0, 1000.0, 0.0011),
+            sync_round("post_acquisition", 110.0, 1000.1, 0.0011),
+        )
+        self.assertFalse(alignment["classification_eligible"])
+        self.assertEqual(
+            alignment["fallback_reason"], "CLOCK_UNCERTAINTY_EXCEEDED"
+        )
 
     def test_acquisition_start_failure_completes_workload_for_review(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -433,7 +582,7 @@ class RunManagerTests(unittest.TestCase):
             self.assertEqual(manifest["acquisition"]["status"], "FAILED")
             self.assertEqual(
                 manifest["measurement"]["total_executed_inferences"],
-                200,
+                240,
             )
             self.assertEqual(controller.stop_calls, 1)
 

@@ -11,10 +11,8 @@ import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from matplotlib.patches import Patch
 from skimage.filters import threshold_otsu
 
 
@@ -34,6 +32,7 @@ class ProcessingConfig:
     minimum_active_seconds: float = 0.10
     minimum_idle_seconds: float = 0.05
     maximum_preparation_seconds: float = 2.0
+    max_clock_uncertainty_fraction: float = 0.10
 
     def __post_init__(self):
         positive_values = {
@@ -43,6 +42,9 @@ class ProcessingConfig:
             "minimum_active_seconds": self.minimum_active_seconds,
             "minimum_idle_seconds": self.minimum_idle_seconds,
             "maximum_preparation_seconds": self.maximum_preparation_seconds,
+            "max_clock_uncertainty_fraction": (
+                self.max_clock_uncertainty_fraction
+            ),
         }
         if self.sampling_rate_hz is not None:
             positive_values["sampling_rate_hz"] = self.sampling_rate_hz
@@ -103,7 +105,7 @@ def _time_axis(data, sampling_rate_hz):
     if ELAPSED_COLUMN in data:
         elapsed = pd.to_numeric(data[ELAPSED_COLUMN], errors="coerce")
         if elapsed.notna().all() and elapsed.is_monotonic_increasing:
-            return elapsed - elapsed.iloc[0]
+            return elapsed
     if "Sample" not in data:
         raise ValueError(f"CSV must contain '{ELAPSED_COLUMN}' or 'Sample'")
     samples = pd.to_numeric(data["Sample"], errors="coerce")
@@ -188,77 +190,116 @@ def _signal_active_mask(smoothed, threshold, sampling_rate_hz, config):
     return _remove_short_runs(active, False, minimum_idle)
 
 
-def _manifest_active_mask(data, manifest):
-    if manifest is None or TIMESTAMP_COLUMN not in data:
-        return None
+def _aligned_active_mask(time_axis, manifest, sampling_rate_hz, config):
+    threshold_seconds = (
+        config.max_clock_uncertainty_fraction / sampling_rate_hz
+    )
+    diagnostics = {
+        "status": "UNAVAILABLE",
+        "uncertainty_seconds": None,
+        "uncertainty_threshold_seconds": threshold_seconds,
+        "fallback_reason": None,
+    }
+    if manifest is None:
+        diagnostics["fallback_reason"] = "MANIFEST_UNAVAILABLE"
+        return None, diagnostics
+    if manifest.get("schema_version") != 2:
+        diagnostics["fallback_reason"] = "LEGACY_MANIFEST_NO_ALIGNMENT"
+        return None, diagnostics
+
+    alignment = manifest.get("acquisition", {}).get("clock_alignment")
+    if not isinstance(alignment, dict):
+        diagnostics["fallback_reason"] = "CLOCK_ALIGNMENT_UNAVAILABLE"
+        return None, diagnostics
+    diagnostics["status"] = alignment.get("status", "UNAVAILABLE")
+    diagnostics["fallback_reason"] = alignment.get("fallback_reason")
+    try:
+        uncertainty_seconds = float(alignment["uncertainty_seconds"])
+    except (KeyError, TypeError, ValueError):
+        diagnostics["fallback_reason"] = "CLOCK_UNCERTAINTY_UNAVAILABLE"
+        return None, diagnostics
+    diagnostics["uncertainty_seconds"] = uncertainty_seconds
+    if not np.isfinite(uncertainty_seconds) or uncertainty_seconds < 0:
+        diagnostics["fallback_reason"] = "CLOCK_UNCERTAINTY_INVALID"
+        return None, diagnostics
+    if uncertainty_seconds > threshold_seconds:
+        diagnostics["fallback_reason"] = "CLOCK_UNCERTAINTY_EXCEEDED"
+        return None, diagnostics
+    if alignment.get("classification_eligible") is not True:
+        diagnostics["fallback_reason"] = (
+            alignment.get("fallback_reason")
+            or "CLOCK_ALIGNMENT_NOT_ELIGIBLE"
+        )
+        return None, diagnostics
+
     cycles = manifest.get("measurement", {}).get("cycles", [])
     if not cycles:
-        return None
-
-    timestamps = _parse_utc_timestamps(data[TIMESTAMP_COLUMN])
-    if timestamps.isna().any():
-        return None
-    active = np.zeros(len(data), dtype=bool)
+        diagnostics["fallback_reason"] = "ALIGNED_BURST_BOUNDS_UNAVAILABLE"
+        return None, diagnostics
+    times = np.asarray(time_axis, dtype=float)
+    if not np.isfinite(times).all() or np.any(np.diff(times) < 0):
+        diagnostics["fallback_reason"] = "CSV_ELAPSED_TIME_INVALID"
+        return None, diagnostics
+    active = np.zeros(len(times), dtype=bool)
     for cycle in cycles:
         try:
-            start = pd.to_datetime(cycle["start_event"]["wall_time_utc"], utc=True)
-            end = pd.to_datetime(cycle["end_event"]["wall_time_utc"], utc=True)
+            start = float(cycle["start_event"]["aligned_elapsed_seconds"])
+            end = float(cycle["end_event"]["aligned_elapsed_seconds"])
         except (KeyError, TypeError, ValueError):
-            return None
-        active |= ((timestamps >= start) & (timestamps <= end)).to_numpy()
-    return active if active.any() else None
+            diagnostics["fallback_reason"] = "ALIGNED_BURST_BOUNDS_UNAVAILABLE"
+            return None, diagnostics
+        if not (
+            np.isfinite(start)
+            and np.isfinite(end)
+            and times[0] <= start < end <= times[-1]
+        ):
+            diagnostics["fallback_reason"] = "ALIGNED_BURST_BOUNDS_INVALID"
+            return None, diagnostics
+        active |= (times >= start) & (times <= end)
+    if not active.any() or len(_run_bounds(active)) != len(cycles):
+        diagnostics["fallback_reason"] = "ALIGNED_BURST_SAMPLES_INVALID"
+        return None, diagnostics
+    diagnostics["fallback_reason"] = None
+    return active, diagnostics
 
 
-def _manifest_preparation_mask(data, manifest, active, config):
-    if manifest is None or TIMESTAMP_COLUMN not in data:
-        return None
+def _aligned_preparation_mask(time_axis, manifest, active, config):
     cycles = manifest.get("measurement", {}).get("cycles", [])
     plan = manifest.get("plan", {})
     if not cycles or "sleep_time_seconds" not in plan:
         return None
 
-    timestamps = _parse_utc_timestamps(data[TIMESTAMP_COLUMN])
-    if timestamps.isna().any():
-        return None
+    times = np.asarray(time_axis, dtype=float)
     maximum_duration = pd.to_timedelta(
         config.maximum_preparation_seconds, unit="s"
     )
-    preparation = np.zeros(len(data), dtype=bool)
+    preparation = np.zeros(len(times), dtype=bool)
     previous_end = None
     for cycle_index, cycle in enumerate(cycles):
         try:
-            burst_start = pd.to_datetime(
-                cycle["start_event"]["wall_time_utc"], utc=True
+            burst_start = float(
+                cycle["start_event"]["aligned_elapsed_seconds"]
             )
             if cycle_index == 0:
-                acquisition_start_value = manifest.get("acquisition", {}).get(
-                    "started_at_utc"
-                )
-                if acquisition_start_value is None:
-                    return None
-                acquisition_start = pd.to_datetime(
-                    acquisition_start_value, utc=True
-                )
-                preparation_start = acquisition_start + pd.to_timedelta(
-                    float(plan.get("leading_idle_seconds", 0.0)), unit="s"
+                preparation_start = float(
+                    plan.get("leading_idle_seconds", 0.0)
                 )
             else:
-                preparation_start = previous_end + pd.to_timedelta(
-                    float(plan["sleep_time_seconds"]), unit="s"
+                preparation_start = previous_end + float(
+                    plan["sleep_time_seconds"]
                 )
-            previous_end = pd.to_datetime(
-                cycle["end_event"]["wall_time_utc"], utc=True
+            previous_end = float(
+                cycle["end_event"]["aligned_elapsed_seconds"]
             )
         except (KeyError, TypeError, ValueError):
             return None
 
         preparation_start = max(
-            preparation_start, burst_start - maximum_duration
+            preparation_start,
+            burst_start - maximum_duration.total_seconds(),
         )
         if preparation_start < burst_start:
-            preparation |= (
-                (timestamps >= preparation_start) & (timestamps < burst_start)
-            ).to_numpy()
+            preparation |= (times >= preparation_start) & (times < burst_start)
     preparation &= ~np.asarray(active, dtype=bool)
     return preparation if preparation.any() else None
 
@@ -293,6 +334,73 @@ def _infer_preparation_mask(
     return preparation
 
 
+def _idle_baseline(samples, manifest):
+    times = samples["time_s"]
+    fallback_reason = None
+    safety_margin_seconds = None
+    if manifest is not None:
+        safety_margin_seconds = manifest.get("plan", {}).get(
+            "safety_margin_seconds"
+        )
+    try:
+        safety_margin_seconds = float(safety_margin_seconds)
+    except (TypeError, ValueError):
+        safety_margin_seconds = None
+
+    candidates = pd.Series(dtype=float)
+    source = "final measured safety margin"
+    if safety_margin_seconds is None or safety_margin_seconds <= 0:
+        fallback_reason = "SAFETY_MARGIN_UNAVAILABLE"
+    else:
+        window_start = float(times.iloc[-1] - safety_margin_seconds)
+        candidates = samples.loc[
+            (times >= window_start) & (samples["phase"] == "idle"),
+            "power_clean_W",
+        ]
+        if len(candidates) < 2:
+            fallback_reason = "SAFETY_MARGIN_IDLE_SAMPLES_INSUFFICIENT"
+
+    if fallback_reason is not None:
+        source = "classified idle fallback"
+        candidates = samples.loc[
+            samples["phase"] == "idle", "power_clean_W"
+        ]
+
+    if candidates.empty:
+        return np.nan, {
+            "source": "unavailable",
+            "fallback_reason": fallback_reason or "IDLE_SAMPLES_UNAVAILABLE",
+            "sample_count": 0,
+            "start_time_s": None,
+            "end_time_s": None,
+            "power_median_W": None,
+            "power_mad_W": None,
+        }
+
+    baseline = float(candidates.median())
+    candidate_times = times.loc[candidates.index]
+    mad = float(np.median(np.abs(candidates.to_numpy() - baseline)))
+    return baseline, {
+        "source": source,
+        "fallback_reason": fallback_reason,
+        "sample_count": int(len(candidates)),
+        "start_time_s": float(candidate_times.iloc[0]),
+        "end_time_s": float(candidate_times.iloc[-1]),
+        "power_median_W": baseline,
+        "power_mad_W": mad,
+    }
+
+
+def _single_sample_duration(times, index, sampling_rate_hz):
+    if len(times) == 1:
+        return 1.0 / sampling_rate_hz
+    if index == 0:
+        return float(times.iloc[1] - times.iloc[0])
+    if index == len(times) - 1:
+        return float(times.iloc[-1] - times.iloc[-2])
+    return float((times.iloc[index + 1] - times.iloc[index - 1]) / 2.0)
+
+
 def _build_regions(samples, sampling_rate_hz, manifest):
     regions = []
     inferences_per_cycle = None
@@ -301,23 +409,40 @@ def _build_regions(samples, sampling_rate_hz, manifest):
             "inferences_per_cycle"
         )
 
-    idle_power = samples.loc[samples["phase"] == "idle", "power_smoothed_W"]
-    global_idle = float(idle_power.median()) if not idle_power.empty else np.nan
+    idle_baseline, baseline_metadata = _idle_baseline(samples, manifest)
     for cycle, (start, end) in enumerate(
         _run_bounds(samples["is_active"]), start=1
     ):
         active_power = samples["power_clean_W"].iloc[start:end]
-        duration = (end - start) / sampling_rate_hz
-        offset_power = float(active_power.mean() - global_idle)
-        energy = offset_power * duration
+        active_times = samples["time_s"].iloc[start:end]
+        if len(active_times) > 1:
+            deltas = np.diff(active_times.to_numpy(dtype=float))
+            if np.any(deltas <= 0):
+                raise ValueError("Elapsed Time (s) must be strictly increasing")
+            duration = float(active_times.iloc[-1] - active_times.iloc[0])
+            interval_power = (
+                active_power.to_numpy(dtype=float)[:-1]
+                + active_power.to_numpy(dtype=float)[1:]
+            ) / 2.0
+            active_energy = float(np.sum(interval_power * deltas))
+            active_power_mean = active_energy / duration
+        else:
+            duration = _single_sample_duration(
+                samples["time_s"], start, sampling_rate_hz
+            )
+            active_power_mean = float(active_power.iloc[0])
+            active_energy = active_power_mean * duration
+        offset_power = float(active_power_mean - idle_baseline)
+        energy = float(active_energy - idle_baseline * duration)
         regions.append(
             {
                 "cycle": cycle,
                 "start_time_s": float(samples["time_s"].iloc[start]),
                 "end_time_s": float(samples["time_s"].iloc[end - 1]),
                 "duration_s": duration,
-                "active_power_mean_W": float(active_power.mean()),
-                "idle_power_median_W": global_idle,
+                "active_power_mean_W": active_power_mean,
+                "idle_power_median_W": idle_baseline,
+                "idle_baseline_source": baseline_metadata["source"],
                 "power_offset_W": offset_power,
                 "energy_per_cycle_J": energy,
                 "energy_per_inference_J": (
@@ -325,7 +450,7 @@ def _build_regions(samples, sampling_rate_hz, manifest):
                 ),
             }
         )
-    return pd.DataFrame(regions)
+    return pd.DataFrame(regions), baseline_metadata
 
 
 def process_measurement(csv_path, manifest_path=None, config=None):
@@ -359,35 +484,49 @@ def process_measurement(csv_path, manifest_path=None, config=None):
     if np.allclose(smoothed, smoothed.iloc[0]):
         raise ValueError("Power trace is constant; phases cannot be identified")
     threshold = float(threshold_otsu(smoothed.to_numpy()))
+    time_axis = _time_axis(data, sampling_rate_hz)
 
-    manifest_active = _manifest_active_mask(data, manifest)
+    manifest_active, alignment_diagnostics = _aligned_active_mask(
+        time_axis,
+        manifest,
+        sampling_rate_hz,
+        config,
+    )
     if manifest_active is None:
         active = _signal_active_mask(smoothed, threshold, sampling_rate_hz, config)
-        active_source = "signal hysteresis"
+        active_source = "signal hysteresis (Otsu fallback)"
     else:
         active = manifest_active
-        active_source = "manifest burst timestamps"
-    preparation = _manifest_preparation_mask(data, manifest, active, config)
+        active_source = "synchronized manifest elapsed time"
+    preparation = (
+        _aligned_preparation_mask(time_axis, manifest, active, config)
+        if manifest_active is not None
+        else None
+    )
     if preparation is None:
         preparation = _infer_preparation_mask(
             smoothed, active, threshold, sampling_rate_hz, config
         )
         preparation_source = "signal before each active region"
     else:
-        preparation_source = "manifest lifecycle timing"
+        preparation_source = "synchronized manifest lifecycle timing"
 
     phase = np.full(len(data), "idle", dtype=object)
     phase[preparation] = "input_and_parameter_preparation"
     phase[active] = "active_inference"
     samples = data.copy()
-    samples["time_s"] = _time_axis(data, sampling_rate_hz)
+    samples["time_s"] = time_axis
     samples["power_raw_W"] = power
     samples["power_clean_W"] = cleaned
     samples["power_smoothed_W"] = smoothed
     samples["is_outlier"] = is_outlier
     samples["is_active"] = active
     samples["phase"] = phase
-    regions = _build_regions(samples, sampling_rate_hz, manifest)
+    regions, idle_baseline_metadata = _build_regions(
+        samples,
+        sampling_rate_hz,
+        manifest,
+    )
 
     workload_policy = manifest.get("workload_policy", {}) if manifest else {}
     summary = {
@@ -402,6 +541,17 @@ def process_measurement(csv_path, manifest_path=None, config=None):
         "outlier_fraction": float(is_outlier.mean()),
         "active_region_count": len(regions),
         "active_classification_source": active_source,
+        "clock_alignment_status": alignment_diagnostics["status"],
+        "clock_alignment_uncertainty_seconds": alignment_diagnostics[
+            "uncertainty_seconds"
+        ],
+        "clock_alignment_threshold_seconds": alignment_diagnostics[
+            "uncertainty_threshold_seconds"
+        ],
+        "clock_alignment_fallback_reason": alignment_diagnostics[
+            "fallback_reason"
+        ],
+        "idle_baseline": idle_baseline_metadata,
         "preparation_classification_source": preparation_source,
         "preparation_phase": (
             "inferred interval after the configured idle sleep and before "
@@ -422,13 +572,16 @@ def process_measurement(csv_path, manifest_path=None, config=None):
 def plot_measurement(result, output_path, title=None):
     """Save a clean trace with phase shading and visible rejected outliers."""
 
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Patch
+
     samples = result.samples
     figure, axis = plt.subplots(figsize=(15, 6))
     axis.plot(
         samples["time_s"],
         samples["power_raw_W"],
         color="0.72",
-        linewidth=0.35,
+        linewidth=0.15,
         alpha=0.55,
         label="Raw power",
     )
@@ -436,7 +589,7 @@ def plot_measurement(result, output_path, title=None):
         samples["time_s"],
         samples["power_smoothed_W"],
         color="#143642",
-        linewidth=1.0,
+        linewidth=0.35,
         label="Cleaned power",
     )
     outliers = samples[samples["is_outlier"]]
@@ -447,7 +600,7 @@ def plot_measurement(result, output_path, title=None):
             color="#c44900",
             marker="x",
             s=13,
-            linewidths=0.7,
+            linewidths=0.4,
             label="Rejected outlier",
             zorder=4,
         )
@@ -466,7 +619,7 @@ def plot_measurement(result, output_path, title=None):
         result.summary["threshold_W"],
         color="#9b2226",
         linestyle="--",
-        linewidth=0.8,
+        linewidth=0.4,
         label="Signal threshold",
     )
     axis.set(
@@ -475,7 +628,7 @@ def plot_measurement(result, output_path, title=None):
         ylabel="Power (W)",
     )
     axis.set_xlim(samples["time_s"].iloc[0], samples["time_s"].iloc[-1])
-    axis.grid(True, color="0.88", linewidth=0.6)
+    axis.grid(True, color="0.88", linewidth=0.3)
     handles, labels = axis.get_legend_handles_labels()
     handles.extend(
         [
@@ -516,12 +669,22 @@ def build_parser():
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--output-dir", type=Path, default=Path("cleaned_output"))
     parser.add_argument("--sampling-rate-hz", type=float)
+    parser.add_argument(
+        "--max-clock-uncertainty-fraction",
+        type=float,
+        default=0.10,
+    )
     return parser
 
 
 def main():
     args = build_parser().parse_args()
-    config = ProcessingConfig(sampling_rate_hz=args.sampling_rate_hz)
+    config = ProcessingConfig(
+        sampling_rate_hz=args.sampling_rate_hz,
+        max_clock_uncertainty_fraction=(
+            args.max_clock_uncertainty_fraction
+        ),
+    )
     result = process_measurement(args.csv_path, args.manifest, config)
     save_result(result, args.output_dir, args.csv_path.stem)
     print(json.dumps(result.summary, indent=2, sort_keys=True))

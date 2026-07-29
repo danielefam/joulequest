@@ -210,12 +210,10 @@ relative MAD = median(abs(latency - stable latency)) / stable latency
 coefficient of variation = population standard deviation / mean
 ```
 
-Calibration is rejected when either relative MAD or coefficient of variation
-is greater than `max_relative_mad`. The failure is explicit:
-
-```text
-RuntimeError: Calibration did not stabilize ...
-```
+When either relative MAD or coefficient of variation is greater than
+`max_relative_mad`, calibration is retained with `is_stable: false` and
+`CALIBRATION_UNSTABLE`. Measurement continues and completes with
+`quality_status: REVIEW`; no captured cycle is discarded for this condition.
 
 The accepted metrics are stored in the manifest under `calibration`:
 
@@ -234,7 +232,7 @@ an unreliable measured inference count.
 The automatic count continues to use:
 
 $$
-T_{required}=\max\left(T_{target},\frac{N_{samples,min}}{f_s}\right)
+T_{required}=1.2\max\left(T_{target},\frac{N_{samples,min}}{f_s}\right)
 $$
 
 $$
@@ -259,8 +257,21 @@ rejected if its estimated duration would produce fewer than
 
 ## 9. Manifest updates
 
-The manifest remains `schema_version: 1`. The update is additive and preserves
-existing planning and measurement fields.
+New automated manifests use `schema_version: 2`. Schema v2 adds a logger
+monotonic origin, pre/post minimum-RTT synchronization rounds, uncertainty and
+drift metadata, and `aligned_elapsed_seconds` on every burst boundary. Existing
+schema-v1 files remain readable but processing classifies them with Otsu.
+
+The stdio protocol is `stdio_json_v2`. Ten `CLOCK_SYNC_REQUEST` /
+`CLOCK_SYNC_RESPONSE` exchanges run before acquisition and ten after it. The
+alignment gate is inclusive:
+
+$$
+u_{clock} \leq \frac{0.10}{f_s}
+$$
+
+Above the gate, or when synchronization metadata is incomplete, processing
+uses Otsu plus hysteresis and retains the capture.
 
 ### Workload policy
 
@@ -304,6 +315,10 @@ Cycle quality flags remain:
 - `UNDER_RESOLVED`: actual estimated samples are below `min_active_samples`;
 - `DURATION_ANOMALY`: actual duration is below half or above twice the
   calibration estimate.
+
+Calibration can additionally contribute `CALIBRATION_UNSTABLE`. Poor clock
+alignment is recorded as a classifier fallback reason, not as a campaign
+quality failure.
 
 If acquisition fails while the workload completes, the campaign remains
 `COMPLETE`, gains `ACQUISITION_FAILED`, and receives
