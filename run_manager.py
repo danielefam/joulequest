@@ -400,7 +400,6 @@ class RunManager:
             print(json.dumps(payload, sort_keys=True), flush=True)
         return payload
 
-    #gpt5.6
     def _new_campaign_id(self):
         model_stem = Path(self.model_path).stem.replace(" ", "-")
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -507,7 +506,6 @@ class RunManager:
             return None
         return Path(self.manifest_directory) / f"{campaign_id}.json"
 
-    #gpt5.6
     @staticmethod
     def _write_manifest(manifest, path):
         """Atomically replace the campaign manifest to avoid partial JSON."""
@@ -614,6 +612,7 @@ class RunManager:
         runner.prepare_burst()
         start_event = self._emit_event(
             "BURST_START",
+            verbose=False,
             campaign_id=campaign_id,
             cycle=cycle,
             requested_inferences=inference_count,
@@ -629,6 +628,7 @@ class RunManager:
 
         end_event = self._emit_event(
             "BURST_END",
+            verbose=False,
             campaign_id=campaign_id,
             cycle=cycle,
             requested_inferences=result.requested_inferences,
