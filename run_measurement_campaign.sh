@@ -15,8 +15,8 @@ PYTHON_BIN="${PYTHON_BIN:-python}"
 CONNECTION_CONFIG="${CONNECTION_CONFIG:-${SCRIPT_DIR}/measurement_hosts.local.json}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-${SCRIPT_DIR}/measurements/runs}"
 
-BACKEND="${BACKEND:-cuda}"
-MODEL_ROOT="${MODEL_ROOT:-Models/CUDA}"
+BACKEND="${BACKEND:-cpu}"
+MODEL_ROOT="${MODEL_ROOT:-Models/CPU}"
 MODEL_SUFFIX="${MODEL_SUFFIX:-.pt}"
 LINEAR_MODEL_DIRECTORY="${LINEAR_MODEL_DIRECTORY:-${MODEL_ROOT}/Linear}"
 CONV_MODEL_DIRECTORY="${CONV_MODEL_DIRECTORY:-${MODEL_ROOT}/Conv}"
@@ -33,6 +33,9 @@ CALIBRATION_INITIAL_INFERENCES="${CALIBRATION_INITIAL_INFERENCES:-20}"
 CALIBRATION_TARGET_SECONDS="${CALIBRATION_TARGET_SECONDS:-1}"
 CALIBRATION_REPETITIONS="${CALIBRATION_REPETITIONS:-8}"
 MAX_RELATIVE_MAD="${MAX_RELATIVE_MAD:-0.15}"
+BURST_DURATION_MARGIN="${BURST_DURATION_MARGIN:-1.2}"
+CLOCK_SYNC_EXCHANGES="${CLOCK_SYNC_EXCHANGES:-10}"
+MAX_CLOCK_UNCERTAINTY_FRACTION="${MAX_CLOCK_UNCERTAINTY_FRACTION:-0.10}"
 MAX_CALIBRATION_INFERENCES="${MAX_CALIBRATION_INFERENCES:-1000000}"
 LEADING_IDLE_SECONDS="${LEADING_IDLE_SECONDS:-5}"
 TRAILING_IDLE_SECONDS="${TRAILING_IDLE_SECONDS:-30}"
@@ -68,8 +71,7 @@ Options:
   --dry-run           Print commands without running measurements.
   --continue-on-error Continue after an experiment exits nonzero.
   --repeat-completed  Rerun experiments with an existing COMPLETE manifest.
-    --experiment-cooldown-seconds SECONDS
-                                            Idle time between two executed experiments (default: 0).
+    --experiment-cooldown-seconds SECONDS  Inter-experiment idle (default: 20).
   -h, --help          Show this message.
 
 The connection target and remote paths come from measurement_hosts.local.json.
@@ -205,6 +207,13 @@ is_positive_number "$CALIBRATION_TARGET_SECONDS" ||
     die "CALIBRATION_TARGET_SECONDS must be positive"
 is_nonnegative_number "$MAX_RELATIVE_MAD" ||
     die "MAX_RELATIVE_MAD must be nonnegative"
+is_positive_number "$BURST_DURATION_MARGIN" &&
+    awk -v value="$BURST_DURATION_MARGIN" 'BEGIN { exit !(value >= 1) }' ||
+    die "BURST_DURATION_MARGIN must be at least 1"
+[[ "$CLOCK_SYNC_EXCHANGES" =~ ^[1-9][0-9]*$ ]] ||
+    die "CLOCK_SYNC_EXCHANGES must be a positive integer"
+is_positive_number "$MAX_CLOCK_UNCERTAINTY_FRACTION" ||
+    die "MAX_CLOCK_UNCERTAINTY_FRACTION must be positive"
 is_nonnegative_number "$LEADING_IDLE_SECONDS" ||
     die "LEADING_IDLE_SECONDS must be nonnegative"
 is_nonnegative_number "$TRAILING_IDLE_SECONDS" ||
@@ -264,6 +273,9 @@ COMMON_ARGS=(
     --calibration_target_seconds "$CALIBRATION_TARGET_SECONDS"
     --calibration_repetitions "$CALIBRATION_REPETITIONS"
     --max_relative_mad "$MAX_RELATIVE_MAD"
+    --burst-duration-margin "$BURST_DURATION_MARGIN"
+    --clock-sync-exchanges "$CLOCK_SYNC_EXCHANGES"
+    --max-clock-uncertainty-fraction "$MAX_CLOCK_UNCERTAINTY_FRACTION"
     --max_calibration_inferences "$MAX_CALIBRATION_INFERENCES"
     --leading_idle_seconds "$LEADING_IDLE_SECONDS"
     --trailing_idle_seconds "$TRAILING_IDLE_SECONDS"

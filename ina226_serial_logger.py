@@ -437,6 +437,7 @@ def run(
                             port=port,
                             csv_path=str(args.output.resolve()),
                             started_at_utc=started_at_utc,
+                            started_monotonic_seconds=started,
                             first_sample_elapsed_seconds=first_sample_elapsed_s,
                             sample_count=sample,
                         )
@@ -471,6 +472,7 @@ def run(
             "port": port,
             "csv_path": str(args.output.resolve()),
             "started_at_utc": started_at_utc,
+            "started_monotonic_seconds": started,
             "capture_elapsed_seconds": time.monotonic() - started,
             "sample_count": sample,
             "first_sample_elapsed_seconds": first_sample_elapsed_s,

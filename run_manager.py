@@ -43,9 +43,16 @@ class CalibrationResult:
     total_executed_inferences: int
     relative_mad: float
     coefficient_of_variation: float
+    stability_limit: float
+    is_stable: bool
 
 
-def calculate_required_burst_seconds(target_burst_seconds, min_active_samples, sampling_rate_hz):
+def calculate_required_burst_seconds(
+    target_burst_seconds,
+    min_active_samples,
+    sampling_rate_hz,
+    burst_duration_margin=1.2,
+):
     """Return the burst duration required by time and sample constraints.
 
     T_samples = min_active_samples / sampling_rate_hz seconds
@@ -58,15 +65,22 @@ def calculate_required_burst_seconds(target_burst_seconds, min_active_samples, s
         float(target_burst_seconds),
         float(min_active_samples) / float(sampling_rate_hz),
         # units of measurement [#samples] / ([#samples]/[s]) = [s]
-    )
+    ) * float(burst_duration_margin)
 
 
-def calculate_inference_count(stable_latency_seconds, target_burst_seconds, min_active_samples, sampling_rate_hz):
+def calculate_inference_count(
+    stable_latency_seconds,
+    target_burst_seconds,
+    min_active_samples,
+    sampling_rate_hz,
+    burst_duration_margin=1.2,
+):
     """Smallest number of inferences per burst expected to produce a useful burst"""
     required_seconds = calculate_required_burst_seconds(
         target_burst_seconds,
         min_active_samples,
         sampling_rate_hz,
+        burst_duration_margin,
     )
     return max(1, math.ceil(required_seconds / stable_latency_seconds))
 
@@ -88,12 +102,53 @@ def calculate_capture_plan(number_of_cycles, estimated_burst_seconds, sleep_time
     )
 
 
+def calculate_clock_sync_sample(
+    runner_sent_seconds,
+    controller_received_seconds,
+    controller_sent_seconds,
+    runner_received_seconds,
+):
+    """Calculate one controller-minus-runner monotonic clock observation."""
+    timestamps = (
+        float(runner_sent_seconds),
+        float(controller_received_seconds),
+        float(controller_sent_seconds),
+        float(runner_received_seconds),
+    )
+    if not all(math.isfinite(value) for value in timestamps):
+        raise ValueError("Clock synchronization timestamps must be finite")
+    t1, t2, t3, t4 = timestamps
+    if t4 < t1 or t3 < t2:
+        raise ValueError("Clock synchronization timestamps are out of order")
+    round_trip_seconds = (t4 - t1) - (t3 - t2)
+    if round_trip_seconds < 0:
+        raise ValueError("Clock synchronization round trip cannot be negative")
+    return {
+        "runner_sent_monotonic_seconds": t1,
+        "controller_received_monotonic_seconds": t2,
+        "controller_sent_monotonic_seconds": t3,
+        "runner_received_monotonic_seconds": t4,
+        "runner_midpoint_monotonic_seconds": (t1 + t4) / 2.0,
+        "controller_minus_runner_seconds": (
+            (t2 - t1) + (t3 - t4)
+        ) / 2.0,
+        "round_trip_seconds": round_trip_seconds,
+        "uncertainty_seconds": round_trip_seconds / 2.0,
+    }
+
+
 class StdioAcquisitionController:
     """Coordinate acquisition owned by the process controlling stdin/stdout."""
 
-    def __init__(self, input_stream=None, output_stream=None):
+    def __init__(
+        self,
+        input_stream=None,
+        output_stream=None,
+        monotonic_fn=time.monotonic,
+    ):
         self.input_stream = input_stream or sys.stdin
         self.output_stream = output_stream or sys.stdout
+        self.monotonic_fn = monotonic_fn
         self.campaign_id = None
         self.plan = None
         self.stop_result = None
@@ -105,7 +160,7 @@ class StdioAcquisitionController:
     def _emit(self, event, **fields):
         payload = {
             "event": event,
-            "monotonic_seconds": time.monotonic(),
+            "monotonic_seconds": self.monotonic_fn(),
             "wall_time_utc": self._utc_now(),
             **fields,
         }
@@ -114,9 +169,11 @@ class StdioAcquisitionController:
             file=self.output_stream,
             flush=True,
         )
+        return payload
 
-    def _read_result(self, expected_command):
+    def _read_result(self, expected_command, expected_request_id=None):
         line = self.input_stream.readline()
+        received_monotonic_seconds = self.monotonic_fn()
         if not line:
             raise RuntimeError(
                 f"Acquisition controller disconnected before {expected_command}"
@@ -134,18 +191,77 @@ class StdioAcquisitionController:
             )
         if payload.get("campaign_id") != self.campaign_id:
             raise RuntimeError("Acquisition command campaign ID does not match")
+        if (
+            expected_request_id is not None
+            and payload.get("request_id") != expected_request_id
+        ):
+            raise RuntimeError("Clock synchronization request ID does not match")
         result = payload.get("result")
         if not isinstance(result, dict):
             raise RuntimeError("Acquisition command result must be a dictionary")
-        return result
+        return result, received_monotonic_seconds
 
     def describe(self, campaign_id, plan):
         self.campaign_id = campaign_id
         self.plan = dict(plan)
         return {
             "status": "PENDING",
-            "control_protocol": "stdio_json_v1",
+            "control_protocol": "stdio_json_v2",
             "acquisition_role": "controller_host",
+        }
+
+    def synchronize_clock(self, round_name, exchange_count):
+        samples = []
+        errors = []
+        for exchange_index in range(exchange_count):
+            request_id = f"{round_name}:{exchange_index + 1}"
+            request = self._emit(
+                "CLOCK_SYNC_REQUEST",
+                campaign_id=self.campaign_id,
+                round=round_name,
+                request_id=request_id,
+            )
+            try:
+                result, runner_received_seconds = self._read_result(
+                    "CLOCK_SYNC_RESPONSE",
+                    expected_request_id=request_id,
+                )
+                sample = calculate_clock_sync_sample(
+                    request["monotonic_seconds"],
+                    result["controller_received_monotonic_seconds"],
+                    result["controller_sent_monotonic_seconds"],
+                    runner_received_seconds,
+                )
+            except (KeyError, TypeError, ValueError, RuntimeError) as error:
+                errors.append(
+                    {
+                        "request_id": request_id,
+                        "type": type(error).__name__,
+                        "message": str(error),
+                    }
+                )
+                continue
+            sample["request_id"] = request_id
+            samples.append(sample)
+
+        if not samples:
+            return {
+                "status": "UNAVAILABLE",
+                "round": round_name,
+                "method": "minimum_round_trip",
+                "requested_exchange_count": exchange_count,
+                "valid_exchange_count": 0,
+                "errors": errors,
+            }
+        selected = min(samples, key=lambda sample: sample["round_trip_seconds"])
+        return {
+            "status": "COMPLETE",
+            "round": round_name,
+            "method": "minimum_round_trip",
+            "requested_exchange_count": exchange_count,
+            "valid_exchange_count": len(samples),
+            "selected_sample": selected,
+            "errors": errors,
         }
 
     def start(self):
@@ -154,7 +270,8 @@ class StdioAcquisitionController:
             campaign_id=self.campaign_id,
             **self.plan,
         )
-        return self._read_result("ACQUISITION_STARTED")
+        result, _ = self._read_result("ACQUISITION_STARTED")
+        return result
 
     def check_health(self):
         return None
@@ -168,7 +285,7 @@ class StdioAcquisitionController:
             "ACQUISITION_STOP_REQUEST",
             campaign_id=self.campaign_id,
         )
-        self.stop_result = self._read_result("ACQUISITION_STOPPED")
+        self.stop_result, _ = self._read_result("ACQUISITION_STOPPED")
         return dict(self.stop_result)
 
 
@@ -196,6 +313,9 @@ class RunManager:
         calibration_target_seconds=0.5,
         calibration_repetitions=5,
         max_relative_mad=0.15,
+        burst_duration_margin=1.2,
+        clock_sync_exchanges=10,
+        max_clock_uncertainty_fraction=0.10,
         max_calibration_inferences=1_000_000,
         leading_idle_seconds=5.0,
         trailing_idle_seconds=5.0,
@@ -205,6 +325,7 @@ class RunManager:
         manifest_directory=None,
         sleep_fn=time.sleep,
         input_fn=input,
+        monotonic_fn=time.monotonic,
     ):
         self.runner_cls = runner_cls
         self.model_path = model_path
@@ -226,6 +347,11 @@ class RunManager:
         self.calibration_target_seconds = calibration_target_seconds
         self.calibration_repetitions = calibration_repetitions
         self.max_relative_mad = max_relative_mad
+        self.burst_duration_margin = burst_duration_margin
+        self.clock_sync_exchanges = clock_sync_exchanges
+        self.max_clock_uncertainty_fraction = (
+            max_clock_uncertainty_fraction
+        )
         self.max_calibration_inferences = max_calibration_inferences
         self.leading_idle_seconds = leading_idle_seconds
         self.trailing_idle_seconds = trailing_idle_seconds
@@ -235,6 +361,7 @@ class RunManager:
         self.manifest_directory = manifest_directory
         self.sleep_fn = sleep_fn
         self.input_fn = input_fn
+        self.monotonic_fn = monotonic_fn
         self.last_manifest = None
         
         if self.calibration_repetitions < 2:
@@ -244,6 +371,14 @@ class RunManager:
             )
         if self.max_relative_mad < 0:
             raise ValueError("max_relative_mad cannot be negative")
+        if self.burst_duration_margin < 1:
+            raise ValueError("burst_duration_margin must be at least 1")
+        if self.clock_sync_exchanges < 1:
+            raise ValueError("clock_sync_exchanges must be positive")
+        if self.max_clock_uncertainty_fraction <= 0:
+            raise ValueError(
+                "max_clock_uncertainty_fraction must be positive"
+            )
         if self.wait_for_acquisition and self.acquisition_controller is not None:
             raise ValueError(
                 "wait_for_acquisition cannot be combined with automated acquisition"
@@ -256,7 +391,7 @@ class RunManager:
     def _emit_event(self, event, verbose=True, **fields):
         payload = {
             "event": event,
-            "monotonic_seconds": time.monotonic(),
+            "monotonic_seconds": self.monotonic_fn(),
             "wall_time_utc": self._utc_now(),
             **fields,
 
@@ -322,16 +457,10 @@ class RunManager:
         coefficient_of_variation = (
             statistics.pstdev(latencies) / statistics.mean(latencies)
         )
-        if (
+        is_stable = not (
             relative_mad > self.max_relative_mad
             or coefficient_of_variation > self.max_relative_mad
-        ):
-            raise RuntimeError(
-                "Calibration did not stabilize: "
-                f"relative MAD={relative_mad:.6g}, "
-                f"coefficient of variation={coefficient_of_variation:.6g}, "
-                f"limit={self.max_relative_mad:.6g}"
-            )
+        )
 
         return CalibrationResult(
             stable_latency_seconds=stable_latency,
@@ -346,6 +475,8 @@ class RunManager:
             ),
             relative_mad=relative_mad,
             coefficient_of_variation=coefficient_of_variation,
+            stability_limit=self.max_relative_mad,
+            is_stable=is_stable,
         )
 
     def _select_inference_count(self, calibration):
@@ -355,6 +486,7 @@ class RunManager:
                 self.target_burst_seconds,
                 self.min_active_samples,
                 self.sampling_rate_hz,
+                self.burst_duration_margin,
             ), "automatic"
 
         # number of inferences * latency for ONE inference * sampling rate
@@ -393,6 +525,12 @@ class RunManager:
     def _build_measurement_plan(self, calibration):
         """Build the immutable plan used by the INA226 operator."""
         inference_count, selection_mode = self._select_inference_count(calibration)
+        required_burst_seconds = calculate_required_burst_seconds(
+            self.target_burst_seconds,
+            self.min_active_samples,
+            self.sampling_rate_hz,
+            self.burst_duration_margin,
+        )
         estimated_burst_seconds = (
             inference_count * calibration.stable_latency_seconds
         )
@@ -410,6 +548,8 @@ class RunManager:
             "inferences_per_cycle": inference_count,
             "number_of_cycles": self.number_of_cycles,
             "target_burst_seconds": self.target_burst_seconds,
+            "required_burst_seconds": required_burst_seconds,
+            "burst_duration_margin": self.burst_duration_margin,
             "estimated_burst_seconds": estimated_burst_seconds,
             "sampling_rate_hz": self.sampling_rate_hz,
             "min_active_samples": self.min_active_samples,
@@ -444,6 +584,9 @@ class RunManager:
         manifest["calibration"] = {
             **asdict(calibration),
             "included_in_measurement": False,
+            "quality_flags": (
+                [] if calibration.is_stable else ["CALIBRATION_UNSTABLE"]
+            ),
         }
         self._emit_event(
             "CALIBRATION_END",
@@ -591,6 +734,195 @@ class RunManager:
         except Exception as error:
             self._mark_acquisition_failed(manifest, error)
 
+    def _synchronize_clock_round(self, round_name):
+        synchronize = getattr(
+            self.acquisition_controller,
+            "synchronize_clock",
+            None,
+        )
+        if not callable(synchronize):
+            return {
+                "status": "UNAVAILABLE",
+                "round": round_name,
+                "method": "unavailable",
+                "requested_exchange_count": self.clock_sync_exchanges,
+                "valid_exchange_count": 0,
+                "errors": [
+                    {
+                        "type": "ClockSynchronizationUnavailable",
+                        "message": (
+                            "Acquisition controller does not support clock "
+                            "synchronization"
+                        ),
+                    }
+                ],
+            }
+        try:
+            result = synchronize(round_name, self.clock_sync_exchanges)
+            if not isinstance(result, dict):
+                raise TypeError(
+                    "clock synchronization result must be a dictionary"
+                )
+            return result
+        except Exception as error:
+            return {
+                "status": "UNAVAILABLE",
+                "round": round_name,
+                "method": "unavailable",
+                "requested_exchange_count": self.clock_sync_exchanges,
+                "valid_exchange_count": 0,
+                "errors": [
+                    {
+                        "type": type(error).__name__,
+                        "message": str(error),
+                    }
+                ],
+            }
+
+    @staticmethod
+    def _selected_sync_sample(round_result):
+        if not isinstance(round_result, dict):
+            raise ValueError("Clock synchronization round is missing")
+        if round_result.get("status") != "COMPLETE":
+            raise ValueError("Clock synchronization round is unavailable")
+        sample = round_result.get("selected_sample")
+        if not isinstance(sample, dict):
+            raise ValueError("Clock synchronization sample is missing")
+        required = (
+            "runner_midpoint_monotonic_seconds",
+            "controller_minus_runner_seconds",
+            "round_trip_seconds",
+            "uncertainty_seconds",
+        )
+        values = {}
+        for field in required:
+            value = float(sample[field])
+            if not math.isfinite(value):
+                raise ValueError(
+                    f"Clock synchronization field {field} must be finite"
+                )
+            values[field] = value
+        if values["round_trip_seconds"] < 0 or values["uncertainty_seconds"] < 0:
+            raise ValueError("Clock synchronization uncertainty cannot be negative")
+        return sample, values
+
+    def _finalize_clock_alignment(self, manifest, pre_sync, post_sync):
+        threshold_seconds = (
+            self.max_clock_uncertainty_fraction / self.sampling_rate_hz
+        )
+        alignment = {
+            "protocol_version": 2,
+            "status": "UNAVAILABLE",
+            "method": "minimum_round_trip",
+            "pre_sync": pre_sync,
+            "post_sync": post_sync,
+            "uncertainty_threshold_fraction_of_sample_period": (
+                self.max_clock_uncertainty_fraction
+            ),
+            "uncertainty_threshold_seconds": threshold_seconds,
+            "classification_eligible": False,
+            "fallback_reason": "CLOCK_SYNC_UNAVAILABLE",
+        }
+        manifest.setdefault("acquisition", {})["clock_alignment"] = alignment
+
+        try:
+            pre_sample, pre_values = self._selected_sync_sample(pre_sync)
+            post_sample, post_values = self._selected_sync_sample(post_sync)
+        except (KeyError, TypeError, ValueError) as error:
+            alignment["fallback_reason"] = "CLOCK_SYNC_METADATA_INVALID"
+            alignment["validation_error"] = str(error)
+            return alignment
+
+        pre_midpoint = pre_values["runner_midpoint_monotonic_seconds"]
+        post_midpoint = post_values["runner_midpoint_monotonic_seconds"]
+        if post_midpoint <= pre_midpoint:
+            alignment["fallback_reason"] = "CLOCK_SYNC_ROUNDS_OUT_OF_ORDER"
+            return alignment
+
+        acquisition = manifest["acquisition"]
+        try:
+            logger_start = float(acquisition["started_monotonic_seconds"])
+        except (KeyError, TypeError, ValueError):
+            alignment["fallback_reason"] = "LOGGER_MONOTONIC_ORIGIN_UNAVAILABLE"
+            return alignment
+        if not math.isfinite(logger_start):
+            alignment["fallback_reason"] = "LOGGER_MONOTONIC_ORIGIN_INVALID"
+            return alignment
+
+        pre_offset = pre_values["controller_minus_runner_seconds"]
+        post_offset = post_values["controller_minus_runner_seconds"]
+        uncertainty_seconds = max(
+            pre_values["uncertainty_seconds"],
+            post_values["uncertainty_seconds"],
+        )
+        alignment.update(
+            {
+                "status": "COMPLETE",
+                "method": (
+                    "same_host_monotonic"
+                    if pre_sync.get("method") == "same_host_monotonic"
+                    and post_sync.get("method") == "same_host_monotonic"
+                    else "minimum_round_trip_with_linear_drift"
+                ),
+                "uncertainty_seconds": uncertainty_seconds,
+                "offset_drift_seconds": post_offset - pre_offset,
+                "logger_started_monotonic_seconds": logger_start,
+            }
+        )
+
+        capture_elapsed = acquisition.get("capture_elapsed_seconds")
+        try:
+            capture_elapsed = float(capture_elapsed)
+        except (TypeError, ValueError):
+            capture_elapsed = None
+        translated_cycles = 0
+        bounds_valid = capture_elapsed is not None and capture_elapsed > 0
+        for cycle in manifest.get("measurement", {}).get("cycles", []):
+            translated = []
+            for event_name in ("start_event", "end_event"):
+                event = cycle.get(event_name, {})
+                try:
+                    runner_seconds = float(event["monotonic_seconds"])
+                except (KeyError, TypeError, ValueError):
+                    bounds_valid = False
+                    break
+                position = (
+                    (runner_seconds - pre_midpoint)
+                    / (post_midpoint - pre_midpoint)
+                )
+                offset = pre_offset + position * (post_offset - pre_offset)
+                controller_seconds = runner_seconds + offset
+                elapsed_seconds = controller_seconds - logger_start
+                if not math.isfinite(elapsed_seconds):
+                    bounds_valid = False
+                    break
+                event["aligned_controller_monotonic_seconds"] = controller_seconds
+                event["aligned_elapsed_seconds"] = elapsed_seconds
+                translated.append(elapsed_seconds)
+            if len(translated) != 2:
+                continue
+            start_elapsed, end_elapsed = translated
+            if not (
+                0 <= start_elapsed < end_elapsed <= capture_elapsed
+            ):
+                bounds_valid = False
+                continue
+            translated_cycles += 1
+
+        expected_cycles = len(
+            manifest.get("measurement", {}).get("cycles", [])
+        )
+        alignment["translated_cycle_count"] = translated_cycles
+        if not bounds_valid or translated_cycles != expected_cycles:
+            alignment["fallback_reason"] = "ALIGNED_BURST_BOUNDS_INVALID"
+            return alignment
+        if uncertainty_seconds > threshold_seconds:
+            alignment["fallback_reason"] = "CLOCK_UNCERTAINTY_EXCEEDED"
+            return alignment
+        alignment["classification_eligible"] = True
+        alignment["fallback_reason"] = None
+        return alignment
+
     def _complete_manifest(self, manifest, manifest_path, campaign_id):
         """Add quality status, persist the final manifest, and emit COMPLETE."""
         all_flags = [
@@ -598,6 +930,7 @@ class RunManager:
             for cycle in manifest["measurement"]["cycles"]
             for flag in cycle["quality_flags"]
         ]
+        all_flags.extend(manifest.get("calibration", {}).get("quality_flags", []))
         if manifest.get("acquisition", {}).get("status") == "FAILED":
             all_flags.append("ACQUISITION_FAILED")
         manifest["quality_status"] = "OK" if not all_flags else "REVIEW"
@@ -619,7 +952,7 @@ class RunManager:
         campaign_id = self._new_campaign_id()
         manifest_path = self._manifest_path(campaign_id)
         manifest = {
-            "schema_version": 1,
+            "schema_version": 2,
             "campaign_id": campaign_id,
             "status": "STARTING",
             "created_at_utc": self._utc_now(),
@@ -649,7 +982,14 @@ class RunManager:
             self._write_manifest(manifest, manifest_path)
             self._emit_event("READY", campaign_id=campaign_id, **plan)
 
+            pre_sync = None
             if self.acquisition_controller is not None:
+                pre_sync = self._synchronize_clock_round("pre_acquisition")
+                manifest["acquisition"]["clock_alignment"] = {
+                    "protocol_version": 2,
+                    "status": "PENDING",
+                    "pre_sync": pre_sync,
+                }
                 self._start_acquisition(manifest)
             elif self.wait_for_acquisition:
                 self.input_fn("Start INA226 acquisition, then press Enter to begin the leading idle interval...")
@@ -670,6 +1010,12 @@ class RunManager:
                 self._check_acquisition_health(manifest)
                 self._stop_acquisition(manifest)
                 acquisition_stopped = True
+                post_sync = self._synchronize_clock_round("post_acquisition")
+                self._finalize_clock_alignment(
+                    manifest,
+                    pre_sync,
+                    post_sync,
+                )
             elif self.wait_for_acquisition:
                 self.input_fn("Stop INA226 acquisition, then press Enter to write the manifest...")
             self._complete_manifest(manifest, manifest_path, campaign_id)
@@ -721,6 +1067,9 @@ def build_argument_parser():
     parser.add_argument("--calibration_target_seconds", type=float, default=0.5)
     parser.add_argument("--calibration_repetitions", type=int, default=5, help="at least 2 because the first one in discarded")
     parser.add_argument("--max_relative_mad", type=float, default=0.15, help="maximum accepted relative MAD and coefficient of variation")
+    parser.add_argument("--burst-duration-margin", type=float, default=1.2, help="safety factor applied to automatically planned burst duration")
+    parser.add_argument("--clock-sync-exchanges", type=int, default=10, help="clock exchanges in each pre/post acquisition synchronization round")
+    parser.add_argument("--max-clock-uncertainty-fraction", type=float, default=0.10, help="maximum alignment uncertainty as a fraction of one sample period")
     parser.add_argument("--max_calibration_inferences", type=int, default=1000000)
     parser.add_argument("--leading_idle_seconds", type=float, default=5.0)
     parser.add_argument("--trailing_idle_seconds", type=float, default=5.0)
@@ -762,6 +1111,9 @@ def main():
         calibration_target_seconds=args.calibration_target_seconds,
         calibration_repetitions=args.calibration_repetitions,
         max_relative_mad=args.max_relative_mad,
+        burst_duration_margin=args.burst_duration_margin,
+        clock_sync_exchanges=args.clock_sync_exchanges,
+        max_clock_uncertainty_fraction=args.max_clock_uncertainty_fraction,
         max_calibration_inferences=args.max_calibration_inferences,
         leading_idle_seconds=args.leading_idle_seconds,
         trailing_idle_seconds=args.trailing_idle_seconds,

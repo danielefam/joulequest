@@ -123,6 +123,28 @@ class Ina226ProcessController:
             "serial_timeout_seconds": self.serial_timeout_seconds,
         }
 
+    def synchronize_clock(self, round_name, exchange_count):
+        now = self.monotonic_fn()
+        return {
+            "status": "COMPLETE",
+            "round": round_name,
+            "method": "same_host_monotonic",
+            "requested_exchange_count": exchange_count,
+            "valid_exchange_count": 1,
+            "selected_sample": {
+                "request_id": f"{round_name}:same-host",
+                "runner_sent_monotonic_seconds": now,
+                "controller_received_monotonic_seconds": now,
+                "controller_sent_monotonic_seconds": now,
+                "runner_received_monotonic_seconds": now,
+                "runner_midpoint_monotonic_seconds": now,
+                "controller_minus_runner_seconds": 0.0,
+                "round_trip_seconds": 0.0,
+                "uncertainty_seconds": 0.0,
+            },
+            "errors": [],
+        }
+
     def _command(self):
         if self.campaign_id is None or self.csv_path is None:
             raise RuntimeError("describe() must be called before start()")
@@ -449,6 +471,12 @@ class SshExperimentController:
             str(args.calibration_repetitions),
             "--max_relative_mad",
             str(args.max_relative_mad),
+            "--burst-duration-margin",
+            str(args.burst_duration_margin),
+            "--clock-sync-exchanges",
+            str(args.clock_sync_exchanges),
+            "--max-clock-uncertainty-fraction",
+            str(args.max_clock_uncertainty_fraction),
             "--max_calibration_inferences",
             str(args.max_calibration_inferences),
             "--leading_idle_seconds",
@@ -566,14 +594,35 @@ class SshExperimentController:
         finally:
             self.lines.put(None)
 
-    def _send_result(self, command, result):
+    def _send_result(self, command, result, request_id=None):
         payload = {
             "command": command,
             "campaign_id": self.campaign_id,
             "result": result,
         }
+        if request_id is not None:
+            payload["request_id"] = request_id
         self.process.stdin.write(json.dumps(payload, sort_keys=True) + "\n")
         self.process.stdin.flush()
+
+    def _handle_clock_sync_request(self, event):
+        controller_received_seconds = self.monotonic_fn()
+        request_id = event.get("request_id")
+        if not isinstance(request_id, str) or not request_id:
+            raise RemoteExperimentError(
+                "Clock synchronization request has no request ID"
+            )
+        controller_sent_seconds = self.monotonic_fn()
+        self._send_result(
+            "CLOCK_SYNC_RESPONSE",
+            {
+                "controller_received_monotonic_seconds": (
+                    controller_received_seconds
+                ),
+                "controller_sent_monotonic_seconds": controller_sent_seconds,
+            },
+            request_id=request_id,
+        )
 
     def _failure_result(self, error, base=None):
         if (
@@ -665,7 +714,9 @@ class SshExperimentController:
                 "Remote event campaign ID does not match the experiment"
             )
 
-        if event_name == "ACQUISITION_START_REQUEST":
+        if event_name == "CLOCK_SYNC_REQUEST":
+            self._handle_clock_sync_request(event)
+        elif event_name == "ACQUISITION_START_REQUEST":
             self._start_local_acquisition(event)
         elif event_name == "ACQUISITION_STOP_REQUEST":
             result = self._stop_local_acquisition()
@@ -926,6 +977,13 @@ def build_argument_parser():
     parser.add_argument("--calibration_target_seconds", type=float, default=0.5)
     parser.add_argument("--calibration_repetitions", type=int, default=5)
     parser.add_argument("--max_relative_mad", type=float, default=0.15)
+    parser.add_argument("--burst-duration-margin", type=float, default=1.2)
+    parser.add_argument("--clock-sync-exchanges", type=int, default=10)
+    parser.add_argument(
+        "--max-clock-uncertainty-fraction",
+        type=float,
+        default=0.10,
+    )
     parser.add_argument("--max_calibration_inferences", type=int, default=1_000_000)
     parser.add_argument("--leading_idle_seconds", type=float, default=5.0)
     parser.add_argument("--trailing_idle_seconds", type=float, default=5.0)
@@ -1028,6 +1086,9 @@ def build_local_manager(args, acquisition_controller):
         calibration_target_seconds=args.calibration_target_seconds,
         calibration_repetitions=args.calibration_repetitions,
         max_relative_mad=args.max_relative_mad,
+        burst_duration_margin=args.burst_duration_margin,
+        clock_sync_exchanges=args.clock_sync_exchanges,
+        max_clock_uncertainty_fraction=args.max_clock_uncertainty_fraction,
         max_calibration_inferences=args.max_calibration_inferences,
         leading_idle_seconds=args.leading_idle_seconds,
         trailing_idle_seconds=args.trailing_idle_seconds,

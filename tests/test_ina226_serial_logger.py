@@ -159,6 +159,11 @@ class SamplingLoopTests(unittest.TestCase):
                 [event["event"] for event in events],
                 ["ACQUISITION_READY", "ACQUISITION_COMPLETE"],
             )
+            self.assertEqual(
+                events[0]["started_monotonic_seconds"],
+                events[1]["started_monotonic_seconds"],
+            )
+            self.assertGreater(events[0]["started_monotonic_seconds"], 0)
             with output.open(newline="", encoding="utf-8") as csv_file:
                 rows = list(csv.DictReader(csv_file))
                 self.assertEqual(csv_file.seek(0), 0)
