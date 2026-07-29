@@ -433,7 +433,7 @@ class RunManagerTests(unittest.TestCase):
             self.assertFalse(manifest["calibration"]["is_stable"])
             self.assertEqual(len(manifest["measurement"]["cycles"]), 2)
 
-    def test_all_lifecycle_events_are_emitted_in_order(self):
+    def test_burst_boundary_events_are_recorded_without_stdout_output(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             output = io.StringIO()
             manager = self._manager(temp_dir, number_of_cycles=1)
@@ -453,8 +453,6 @@ class RunManagerTests(unittest.TestCase):
                     "CALIBRATION_START",
                     "CALIBRATION_END",
                     "READY",
-                    "BURST_START",
-                    "BURST_END",
                     "COMPLETE",
                 ],
             )
