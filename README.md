@@ -24,7 +24,7 @@ required after starting the command.
 Automated runs use monotonic clock exchanges immediately before and after the
 capture. The resulting schema-v2 manifest translates each remote burst into
 the logger's `Elapsed Time (s)` domain. Processing uses those intervals only
-when alignment uncertainty is at most 10% of one sample period; otherwise it
+when alignment uncertainty is at most 50% of one sample period; otherwise it
 keeps the capture and automatically uses Otsu plus hysteresis.
 
 ```bash
@@ -132,7 +132,7 @@ These are the most useful settings:
 | `--sampling_rate_hz`          | INA226 samples per second                                | `10`                      |
 | `--burst-duration-margin`     | Safety factor for automatic burst sizing                 | `1.2`                     |
 | `--clock-sync-exchanges`      | Exchanges in each pre/post synchronization round         | `10`                      |
-| `--max-clock-uncertainty-fraction` | Maximum uncertainty as a sample-period fraction    | `0.10`                    |
+| `--max-clock-uncertainty-fraction` | Maximum uncertainty as a sample-period fraction    | `0.50`                    |
 | `--wait_for_acquisition`      | Stops and waits for you to start manual INA226 recording | off                         |
 | `--runner-host`               | SSH destination running inference                        | none (single-host fallback) |
 | `--jump-host`                 | SSH host used to reach the inference host                | none                        |
@@ -257,7 +257,7 @@ the processor retains the result and reports a classified-idle fallback.
 python processing_report/process_and_visualize.py \
   --data-dir measurements/runs/BOARD_LABEL \
   --output-dir measurements/Plot/BOARD_LABEL \
-  --max-clock-uncertainty-fraction 0.10
+  --max-clock-uncertainty-fraction 0.50
 ```
 
 The generated `summary.csv` includes model and campaign identity, quality

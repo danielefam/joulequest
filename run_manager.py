@@ -315,7 +315,7 @@ class RunManager:
         max_relative_mad=0.15,
         burst_duration_margin=1.2,
         clock_sync_exchanges=10,
-        max_clock_uncertainty_fraction=0.10,
+        max_clock_uncertainty_fraction=0.50,
         max_calibration_inferences=1_000_000,
         leading_idle_seconds=5.0,
         trailing_idle_seconds=5.0,
@@ -1069,7 +1069,7 @@ def build_argument_parser():
     parser.add_argument("--max_relative_mad", type=float, default=0.15, help="maximum accepted relative MAD and coefficient of variation")
     parser.add_argument("--burst-duration-margin", type=float, default=1.2, help="safety factor applied to automatically planned burst duration")
     parser.add_argument("--clock-sync-exchanges", type=int, default=10, help="clock exchanges in each pre/post acquisition synchronization round")
-    parser.add_argument("--max-clock-uncertainty-fraction", type=float, default=0.10, help="maximum alignment uncertainty as a fraction of one sample period")
+    parser.add_argument("--max-clock-uncertainty-fraction", type=float, default=0.50, help="maximum alignment uncertainty as a fraction of one sample period")
     parser.add_argument("--max_calibration_inferences", type=int, default=1000000)
     parser.add_argument("--leading_idle_seconds", type=float, default=5.0)
     parser.add_argument("--trailing_idle_seconds", type=float, default=5.0)

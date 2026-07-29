@@ -982,7 +982,7 @@ def build_argument_parser():
     parser.add_argument(
         "--max-clock-uncertainty-fraction",
         type=float,
-        default=0.10,
+        default=0.50,
     )
     parser.add_argument("--max_calibration_inferences", type=int, default=1_000_000)
     parser.add_argument("--leading_idle_seconds", type=float, default=5.0)

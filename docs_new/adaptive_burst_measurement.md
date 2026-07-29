@@ -295,7 +295,7 @@ Automated command exit codes are:
 | `max_relative_mad`               |            ratio |                      0.15 | No                           | MAD/CV review threshold; never discards a capture         |
 | `burst_duration_margin`          |            ratio |                       1.2 | Planning only                | Headroom above target/minimum sample duration             |
 | `clock_sync_exchanges`           |        exchanges |                        10 | No                           | Samples in each pre/post clock round                      |
-| `max_clock_uncertainty_fraction` | sample-period ratio |                    0.10 | Classification only          | Above this value processing uses Otsu                     |
+| `max_clock_uncertainty_fraction` | sample-period ratio |                    0.50 | Classification only          | Above this value processing uses Otsu                     |
 | `max_calibration_inferences`     |       inferences |                 1,000,000 | No                           | Safety cap for a calibration batch                        |
 | `leading_idle_seconds`           |                s |                         5 | Baseline only                | Idle baseline before first useful burst                   |
 | `trailing_idle_seconds`          |                s |                         5 | Baseline only                | Idle baseline after final useful burst                    |
@@ -310,7 +310,7 @@ the burst timer, while the complete sequence of forward passes is included.
 ## 10. Current limitations
 
 - Schema-v2 automated acquisition translates remote monotonic events into the
-  logger elapsed-time domain. If uncertainty exceeds 10% of one sample period,
+   logger elapsed-time domain. If uncertainty exceeds 50% of one sample period,
   or metadata is missing, processing uses Otsu plus hysteresis without
   discarding the capture.
 - Schema-v1 and manual captures do not have a verified monotonic mapping and
