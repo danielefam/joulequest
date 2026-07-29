@@ -155,7 +155,7 @@ campaign parameters:
 | `MAX_RELATIVE_MAD` | `0.15` | MAD/CV threshold for `CALIBRATION_UNSTABLE`; capture continues |
 | `BURST_DURATION_MARGIN` | `1.2` | Automatic burst-duration safety factor |
 | `CLOCK_SYNC_EXCHANGES` | `10` | Exchanges in each pre/post clock round |
-| `MAX_CLOCK_UNCERTAINTY_FRACTION` | `0.10` | Above this sample-period fraction processing uses Otsu |
+| `MAX_CLOCK_UNCERTAINTY_FRACTION` | `0.50` | Above this sample-period fraction processing uses Otsu |
 | `MAX_CALIBRATION_INFERENCES` | `1000000` | Calibration batch safety cap |
 | `LEADING_IDLE_SECONDS` | `5` s | Baseline before the first measured cycle |
 | `TRAILING_IDLE_SECONDS` | `30` s | Measured cooldown after the final cycle |

@@ -126,7 +126,7 @@ class CleanDataProcessingTests(unittest.TestCase):
         self.assertGreater(phase_counts["input_and_parameter_preparation"], 0)
         self.assertFalse(result.summary["one_time_model_preparation_observed"])
 
-    def test_aligned_elapsed_bounds_require_strict_clock_uncertainty(self):
+    def test_aligned_elapsed_bounds_allow_half_sample_clock_uncertainty(self):
         sampling_rate_hz = 100.0
         sample_count = 500
         elapsed = np.arange(sample_count) / sampling_rate_hz
@@ -149,9 +149,9 @@ class CleanDataProcessingTests(unittest.TestCase):
                 "sampling_rate_hz": sampling_rate_hz,
                 "clock_alignment": {
                     "status": "COMPLETE",
-                    "classification_eligible": True,
-                    "uncertainty_seconds": 0.001,
-                    "fallback_reason": None,
+                    "classification_eligible": False,
+                    "uncertainty_seconds": 0.005,
+                    "fallback_reason": "CLOCK_UNCERTAINTY_EXCEEDED",
                 },
             },
             "measurement": {
@@ -184,7 +184,7 @@ class CleanDataProcessingTests(unittest.TestCase):
             aligned = process_measurement(csv_path)
             manifest["acquisition"]["clock_alignment"][
                 "uncertainty_seconds"
-            ] = 0.00101
+            ] = 0.00501
             manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
             fallback = process_measurement(csv_path)
 

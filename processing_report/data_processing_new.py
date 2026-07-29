@@ -32,7 +32,7 @@ class ProcessingConfig:
     minimum_active_seconds: float = 0.10
     minimum_idle_seconds: float = 0.05
     maximum_preparation_seconds: float = 2.0
-    max_clock_uncertainty_fraction: float = 0.10
+    max_clock_uncertainty_fraction: float = 0.50
 
     def __post_init__(self):
         positive_values = {
@@ -213,6 +213,12 @@ def _aligned_active_mask(time_axis, manifest, sampling_rate_hz, config):
         return None, diagnostics
     diagnostics["status"] = alignment.get("status", "UNAVAILABLE")
     diagnostics["fallback_reason"] = alignment.get("fallback_reason")
+    if diagnostics["status"] != "COMPLETE":
+        diagnostics["fallback_reason"] = (
+            diagnostics["fallback_reason"]
+            or "CLOCK_ALIGNMENT_NOT_COMPLETE"
+        )
+        return None, diagnostics
     try:
         uncertainty_seconds = float(alignment["uncertainty_seconds"])
     except (KeyError, TypeError, ValueError):
@@ -224,12 +230,6 @@ def _aligned_active_mask(time_axis, manifest, sampling_rate_hz, config):
         return None, diagnostics
     if uncertainty_seconds > threshold_seconds:
         diagnostics["fallback_reason"] = "CLOCK_UNCERTAINTY_EXCEEDED"
-        return None, diagnostics
-    if alignment.get("classification_eligible") is not True:
-        diagnostics["fallback_reason"] = (
-            alignment.get("fallback_reason")
-            or "CLOCK_ALIGNMENT_NOT_ELIGIBLE"
-        )
         return None, diagnostics
 
     cycles = manifest.get("measurement", {}).get("cycles", [])
@@ -672,7 +672,7 @@ def build_parser():
     parser.add_argument(
         "--max-clock-uncertainty-fraction",
         type=float,
-        default=0.10,
+        default=0.50,
     )
     return parser
 

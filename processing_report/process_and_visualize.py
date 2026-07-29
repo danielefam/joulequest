@@ -31,13 +31,13 @@ def build_parser():
     parser.add_argument(
         "--data-dir",
         type=Path,
-        default=REPOSITORY_ROOT / "measurements" / "runs" / "jetson_nano_base",
+        default=REPOSITORY_ROOT / "measurements" / "runs" / "nano_base",
         help="Directory containing measurement CSV files.",
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=REPOSITORY_ROOT / "measurements" / "Plot" / "jetson_nano_base",
+        default=REPOSITORY_ROOT / "measurements" / "Plot" / "nano_base",
         help="Directory receiving the summary CSV.",
     )
     parser.add_argument(
@@ -56,7 +56,7 @@ def build_parser():
     parser.add_argument(
         "--max-clock-uncertainty-fraction",
         type=float,
-        default=0.10,
+        default=0.50,
         help="Maximum synchronized-clock uncertainty as a sample-period fraction.",
     )
     parser.add_argument("--cutoff", type=float, default=0.5)
