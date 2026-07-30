@@ -184,10 +184,7 @@ def _signal_active_mask(smoothed, threshold, sampling_rate_hz, config):
             state = False
         active[index] = state
 
-    minimum_active = max(1, round(config.minimum_active_seconds * sampling_rate_hz))
-    minimum_idle = max(1, round(config.minimum_idle_seconds * sampling_rate_hz))
-    active = _remove_short_runs(active, True, minimum_active)
-    return _remove_short_runs(active, False, minimum_idle)
+    return active
 
 
 def _aligned_active_mask(time_axis, manifest, sampling_rate_hz, config):
