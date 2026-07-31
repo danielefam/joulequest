@@ -29,6 +29,10 @@ class ProcessingConfig:
     tail_trim_fraction: float = 0.01
     discard_initial_samples: bool = False
     initial_trim_fraction: float = 0.01
+    filter_after_discard: bool = False
+    hampel_window_seconds: float = 0.21
+    hampel_sigma: float = 4.5
+    rolling_window_seconds: float = 0.09
     minimum_active_seconds: float = 0.10
     minimum_idle_seconds: float = 0.05
     maximum_preparation_seconds: float = 2.0
@@ -36,6 +40,9 @@ class ProcessingConfig:
 
     def __post_init__(self):
         positive_values = {
+            "hampel_window_seconds": self.hampel_window_seconds,
+            "hampel_sigma": self.hampel_sigma,
+            "rolling_window_seconds": self.rolling_window_seconds,
             "minimum_active_seconds": self.minimum_active_seconds,
             "minimum_idle_seconds": self.minimum_idle_seconds,
             "maximum_preparation_seconds": self.maximum_preparation_seconds,
@@ -62,6 +69,11 @@ class ProcessingResult:
     samples: pd.DataFrame
     regions: pd.DataFrame
     summary: dict
+
+
+def _odd_window(duration_seconds, sampling_rate_hz, minimum=3):
+    samples = max(minimum, int(round(duration_seconds * sampling_rate_hz)))
+    return samples if samples % 2 else samples + 1
 
 
 def _load_manifest(csv_path, manifest_path=None):
@@ -117,6 +129,26 @@ def _parse_utc_timestamps(values):
         return values.map(
             lambda value: pd.to_datetime(value, utc=True, errors="coerce")
         )
+
+
+def _hampel_clean(power, window, sigma):
+    local_median = power.rolling(window, center=True, min_periods=1).median()
+    absolute_deviation = (power - local_median).abs()
+    local_mad = absolute_deviation.rolling(
+        window, center=True, min_periods=1
+    ).median()
+    robust_scale = 1.4826 * local_mad
+    global_scale = 1.4826 * float(np.median(np.abs(power - power.median())))
+    fallback_scale = global_scale if global_scale > 0 else np.finfo(float).eps
+    robust_scale = robust_scale.mask(robust_scale <= 0, fallback_scale)
+    previous_value = power.shift(1)
+    next_value = power.shift(-1)
+    neighbors_agree = (
+        (previous_value - next_value).abs() <= 2.5 * robust_scale
+    ).fillna(False)
+    is_outlier = (absolute_deviation > sigma * robust_scale) & neighbors_agree
+    cleaned = power.mask(is_outlier).interpolate(limit_direction="both")
+    return cleaned, is_outlier
 
 
 def _run_bounds(mask):
@@ -398,6 +430,42 @@ def _discard_masks(samples, config):
     return power_outliers, initial_discards
 
 
+def _filter_power_after_discard(
+    power,
+    discarded,
+    sampling_rate_hz,
+    config,
+):
+    """Filter retained power without restoring discarded measurements."""
+    discarded_power = power.mask(discarded)
+    hampel_outliers = pd.Series(False, index=power.index, dtype=bool)
+    if not config.filter_after_discard:
+        return discarded_power, discarded_power.copy(), hampel_outliers
+
+    hampel_window = _odd_window(
+        config.hampel_window_seconds,
+        sampling_rate_hz,
+    )
+    rolling_window = _odd_window(
+        config.rolling_window_seconds,
+        sampling_rate_hz,
+    )
+    hampel_input = discarded_power.interpolate(limit_direction="both")
+    cleaned, hampel_outliers = _hampel_clean(
+        hampel_input,
+        hampel_window,
+        config.hampel_sigma,
+    )
+    hampel_outliers &= ~discarded
+    cleaned = cleaned.mask(discarded)
+    smoothed = cleaned.rolling(
+        rolling_window,
+        center=True,
+        min_periods=1,
+    ).mean()
+    return cleaned, smoothed, hampel_outliers
+
+
 def _edge_outlier_counts(mask):
     leading = 0
     while leading < len(mask) and mask[leading]:
@@ -410,7 +478,7 @@ def _edge_outlier_counts(mask):
 
 def _region_statistics(region, sampling_rate_hz, idle_power, inference_count):
     times = region["time_s"]
-    power = region["power_raw_W"].to_numpy(dtype=float)
+    power = region["power_clean_W"].to_numpy(dtype=float)
     power_outliers = region["is_power_outlier"].to_numpy(dtype=bool)
     initial_discards = region["is_initial_discard"].to_numpy(dtype=bool)
     discarded = power_outliers | initial_discards
@@ -534,6 +602,19 @@ def process_measurement(csv_path, manifest_path=None, config=None):
     else:
         active = manifest_active
         active_source = "synchronized manifest elapsed time"
+    samples = data.copy()
+    samples["time_s"] = time_axis
+    samples["power_raw_W"] = power
+    samples["is_active"] = active
+    power_outliers, initial_discards = _discard_masks(samples, config)
+    discarded = power_outliers | initial_discards
+    cleaned, smoothed, hampel_outliers = _filter_power_after_discard(
+        power,
+        discarded,
+        sampling_rate_hz,
+        config,
+    )
+
     preparation = (
         _aligned_preparation_mask(time_axis, manifest, active, config)
         if manifest_active is not None
@@ -541,7 +622,7 @@ def process_measurement(csv_path, manifest_path=None, config=None):
     )
     if preparation is None:
         preparation = _infer_preparation_mask(
-            power, active, threshold, sampling_rate_hz, config
+            smoothed, active, threshold, sampling_rate_hz, config
         )
         preparation_source = "signal before each active region"
     else:
@@ -550,18 +631,13 @@ def process_measurement(csv_path, manifest_path=None, config=None):
     phase = np.full(len(data), "idle", dtype=object)
     phase[preparation] = "input_and_parameter_preparation"
     phase[active] = "active_inference"
-    samples = data.copy()
-    samples["time_s"] = time_axis
-    samples["power_raw_W"] = power
-    samples["is_active"] = active
     samples["phase"] = phase
-    power_outliers, initial_discards = _discard_masks(samples, config)
-    is_outlier = power_outliers | initial_discards
     samples["is_power_outlier"] = power_outliers
     samples["is_initial_discard"] = initial_discards
-    samples["is_outlier"] = is_outlier
-    samples["power_clean_W"] = power.mask(is_outlier)
-    samples["power_smoothed_W"] = samples["power_clean_W"]
+    samples["is_hampel_outlier"] = hampel_outliers
+    samples["is_outlier"] = discarded
+    samples["power_clean_W"] = cleaned
+    samples["power_smoothed_W"] = smoothed
     regions, idle_baseline_metadata = _build_regions(
         samples,
         sampling_rate_hz,
@@ -577,12 +653,14 @@ def process_measurement(csv_path, manifest_path=None, config=None):
         "sampling_rate_hz": sampling_rate_hz,
         "sampling_rate_source": rate_source,
         "threshold_W": threshold,
-        "outlier_count": int(is_outlier.sum()),
+        "outlier_count": int(discarded.sum()),
         "power_outlier_count": int(power_outliers.sum()),
         "initial_discard_count": int(initial_discards.sum()),
-        "outlier_fraction": float(is_outlier.mean()),
+        "hampel_outlier_count": int(hampel_outliers.sum()),
+        "filter_after_discard": config.filter_after_discard,
+        "outlier_fraction": float(discarded.mean()),
         "active_outlier_fraction": float(
-            is_outlier.sum() / active.sum() if active.any() else 0.0
+            discarded.sum() / active.sum() if active.any() else 0.0
         ),
         "active_region_count": len(regions),
         "active_classification_source": active_source,
@@ -732,6 +810,32 @@ def build_parser():
         help="Initial time-ordered percentage removed when its flag is set.",
     )
     parser.add_argument(
+        "--filter-after-discard",
+        action="store_true",
+        help=(
+            "After discarding selected samples, apply Hampel replacement "
+            "followed by a centered rolling mean."
+        ),
+    )
+    parser.add_argument(
+        "--hampel-window-seconds",
+        type=float,
+        default=0.21,
+        help="Centered Hampel window duration used by post-discard filtering.",
+    )
+    parser.add_argument(
+        "--hampel-sigma",
+        type=float,
+        default=4.5,
+        help="Hampel outlier threshold in robust standard deviations.",
+    )
+    parser.add_argument(
+        "--rolling-window-seconds",
+        type=float,
+        default=0.09,
+        help="Centered rolling-mean duration applied after Hampel cleaning.",
+    )
+    parser.add_argument(
         "--max-clock-uncertainty-fraction",
         type=float,
         default=0.50,
@@ -746,6 +850,10 @@ def main():
         tail_trim_fraction=args.tail_trim_percentage / 100.0,
         discard_initial_samples=args.discard_initial_samples,
         initial_trim_fraction=args.initial_trim_percentage / 100.0,
+        filter_after_discard=args.filter_after_discard,
+        hampel_window_seconds=args.hampel_window_seconds,
+        hampel_sigma=args.hampel_sigma,
+        rolling_window_seconds=args.rolling_window_seconds,
         max_clock_uncertainty_fraction=(
             args.max_clock_uncertainty_fraction
         ),

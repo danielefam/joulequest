@@ -9,9 +9,9 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 try:
-    from . import data_processing as dp
+    from . import data_processing_discard as dp
 except ImportError:
-    import data_processing as dp
+    import data_processing_discard as dp
 
 try:
     from .artifact_paths import get_manifest_file_path, load_measurement_metadata
@@ -54,6 +54,46 @@ def build_parser():
         help="Sampling-rate override; defaults to each manifest's achieved rate.",
     )
     parser.add_argument(
+        "--tail-trim-percentage",
+        type=float,
+        default=1.0,
+        help="Percentage removed from each power tail in every active region.",
+    )
+    parser.add_argument(
+        "--discard-initial-samples",
+        action="store_true",
+        help="Also discard the first samples of every active region.",
+    )
+    parser.add_argument(
+        "--initial-trim-percentage",
+        type=float,
+        default=1.0,
+        help="Initial time-ordered percentage removed when its flag is set.",
+    )
+    parser.add_argument(
+        "--filter-after-discard",
+        action="store_true",
+        help="Apply Hampel replacement and then a rolling mean after discarding.",
+    )
+    parser.add_argument(
+        "--hampel-window-seconds",
+        type=float,
+        default=0.21,
+        help="Centered Hampel window duration.",
+    )
+    parser.add_argument(
+        "--hampel-sigma",
+        type=float,
+        default=4.5,
+        help="Hampel threshold in robust standard deviations.",
+    )
+    parser.add_argument(
+        "--rolling-window-seconds",
+        type=float,
+        default=0.09,
+        help="Centered rolling-mean duration applied after Hampel cleaning.",
+    )
+    parser.add_argument(
         "--max-clock-uncertainty-fraction",
         type=float,
         default=0.50,
@@ -64,6 +104,22 @@ def build_parser():
     return parser
 
 
+def _processing_config(args):
+    return dp.ProcessingConfig(
+        sampling_rate_hz=args.frequency,
+        tail_trim_fraction=args.tail_trim_percentage / 100.0,
+        discard_initial_samples=args.discard_initial_samples,
+        initial_trim_fraction=args.initial_trim_percentage / 100.0,
+        filter_after_discard=args.filter_after_discard,
+        hampel_window_seconds=args.hampel_window_seconds,
+        hampel_sigma=args.hampel_sigma,
+        rolling_window_seconds=args.rolling_window_seconds,
+        max_clock_uncertainty_fraction=(
+            args.max_clock_uncertainty_fraction
+        ),
+    )
+
+
 def process_file(csv_path, metadata, args, combined_axis):
     manifest_path = get_manifest_file_path(
         args.manifest_dir or args.data_dir,
@@ -72,12 +128,7 @@ def process_file(csv_path, metadata, args, combined_axis):
     result = dp.process_measurement(
         csv_path,
         manifest_path=manifest_path,
-        config=dp.ProcessingConfig(
-            sampling_rate_hz=args.frequency,
-            max_clock_uncertainty_fraction=(
-                args.max_clock_uncertainty_fraction
-            ),
-        ),
+        config=_processing_config(args),
     )
     samples = result.samples
     regions = result.regions
@@ -114,6 +165,10 @@ def process_file(csv_path, metadata, args, combined_axis):
         "energy_mean_J": energies.mean(),
         "energy_variance_J2": energies.var(ddof=1),
         "outlier_count": result.summary["outlier_count"],
+        "power_outlier_count": result.summary["power_outlier_count"],
+        "initial_discard_count": result.summary["initial_discard_count"],
+        "hampel_outlier_count": result.summary["hampel_outlier_count"],
+        "filter_after_discard": result.summary["filter_after_discard"],
         "active_classification_source": result.summary[
             "active_classification_source"
         ],
