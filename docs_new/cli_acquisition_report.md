@@ -94,6 +94,12 @@ python ina226_serial_logger.py \
 
 Replace `/dev/ttyACM0` with the stable `/dev/serial/by-id/...` path for unattended runs. Set `--max-expected-current-a` for the device and workload under test: for example, use `3` for a Raspberry Pi 4 campaign expected to remain below 3 A, and select a larger value when the load can exceed that range. The logger refuses to overwrite an existing file unless `--overwrite` is supplied. Rows are flushed as they are written, and the output includes `Sample` and `EVM1 POWER Results (W)`, which are already consumed by this repository's processing scripts. Address, shunt resistance, maximum expected current, effective current LSB, configuration register, calibration register, requested interval, raw readings, UTC time, and host elapsed time are retained for reproducibility.
 
+Automated campaigns also retain `started_monotonic_seconds`, the exact host
+monotonic origin used by CSV `Elapsed Time (s)`. Schema-v2 orchestration uses
+that value with pre/post clock exchanges to translate inference-host burst
+events into the CSV time domain. UTC remains human-readable metadata and is not
+used for active-state alignment.
+
 For the currently connected Jetson Nano setup with `Rshunt = 0.012 ohm`, use `--max-expected-current-a 5` when 5 A covers the expected peak. This changes calibration and measurement resolution, but not the INA226 conversion cycle or serial polling rate. Keep `--interval-ms 10` for the recommended 100 samples/s campaign rate.
 
 `--interval-ms` requests the period between host polling attempts; it does not change the INA226 conversion-time or averaging bits. At startup the logger now decodes and prints the configured conversion cycle. It warns when the requested interval is shorter than that cycle, when the INA226 is in power-down, one-shot triggered, or single-channel continuous mode, and when the sampling loop misses a requested deadline. A finite run also reports its achieved row rate and deadline-miss count. Validate higher rates on the intended host and output filesystem rather than treating the requested interval as the achieved rate.

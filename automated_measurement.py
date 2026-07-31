@@ -22,7 +22,7 @@ class AcquisitionProcessError(RuntimeError):
 
 
 class RemoteExperimentError(RuntimeError):
-    """Raised when the Jetson experiment cannot be controlled over SSH."""
+    """Raised when the remote board experiment cannot be controlled over SSH."""
 
 
 CONNECTION_CONFIG_KEYS = {
@@ -37,7 +37,7 @@ CONNECTION_CONFIG_KEYS = {
 CONNECTION_DEFAULTS = {
     "remote_directory": ".",
     "remote_python": "python3",
-    "remote_manifest_directory": "measurements_jetson",
+    "remote_manifest_directory": "measurements_board",
     "ssh_connect_timeout_s": 10.0,
 }
 
@@ -121,6 +121,28 @@ class Ina226ProcessController:
             "sampling_rate_hz": self.sampling_rate_hz,
             "requested_interval_ms": self.interval_ms,
             "serial_timeout_seconds": self.serial_timeout_seconds,
+        }
+
+    def synchronize_clock(self, round_name, exchange_count):
+        now = self.monotonic_fn()
+        return {
+            "status": "COMPLETE",
+            "round": round_name,
+            "method": "same_host_monotonic",
+            "requested_exchange_count": exchange_count,
+            "valid_exchange_count": 1,
+            "selected_sample": {
+                "request_id": f"{round_name}:same-host",
+                "runner_sent_monotonic_seconds": now,
+                "controller_received_monotonic_seconds": now,
+                "controller_sent_monotonic_seconds": now,
+                "runner_received_monotonic_seconds": now,
+                "runner_midpoint_monotonic_seconds": now,
+                "controller_minus_runner_seconds": 0.0,
+                "round_trip_seconds": 0.0,
+                "uncertainty_seconds": 0.0,
+            },
+            "errors": [],
         }
 
     def _command(self):
@@ -381,7 +403,7 @@ class Ina226ProcessController:
 
 
 class SshExperimentController:
-    """Run RunManager on the Jetson while acquisition remains local."""
+    """Run RunManager on the remote board while acquisition remains local."""
 
     def __init__(
         self,
@@ -447,8 +469,24 @@ class SshExperimentController:
             str(args.calibration_target_seconds),
             "--calibration_repetitions",
             str(args.calibration_repetitions),
+            "--calibration-sizing-max-attempts",
+            str(args.calibration_sizing_max_attempts),
+            "--calibration-duration-tolerance",
+            str(args.calibration_duration_tolerance),
             "--max_relative_mad",
             str(args.max_relative_mad),
+            "--burst-duration-margin",
+            str(args.burst_duration_margin),
+            "--validation-repetitions",
+            str(args.validation_repetitions),
+            "--validation-max-rounds",
+            str(args.validation_max_rounds),
+            "--validation-safety-margin",
+            str(args.validation_safety_margin),
+            "--clock-sync-exchanges",
+            str(args.clock_sync_exchanges),
+            "--max-clock-uncertainty-fraction",
+            str(args.max_clock_uncertainty_fraction),
             "--max_calibration_inferences",
             str(args.max_calibration_inferences),
             "--leading_idle_seconds",
@@ -470,6 +508,13 @@ class SshExperimentController:
                 [
                     "--warmup_cooldown_seconds",
                     str(args.warmup_cooldown_seconds),
+                ]
+            )
+        if args.validation_cooldown_seconds is not None:
+            arguments.extend(
+                [
+                    "--validation-cooldown-seconds",
+                    str(args.validation_cooldown_seconds),
                 ]
             )
         return arguments
@@ -566,14 +611,35 @@ class SshExperimentController:
         finally:
             self.lines.put(None)
 
-    def _send_result(self, command, result):
+    def _send_result(self, command, result, request_id=None):
         payload = {
             "command": command,
             "campaign_id": self.campaign_id,
             "result": result,
         }
+        if request_id is not None:
+            payload["request_id"] = request_id
         self.process.stdin.write(json.dumps(payload, sort_keys=True) + "\n")
         self.process.stdin.flush()
+
+    def _handle_clock_sync_request(self, event):
+        controller_received_seconds = self.monotonic_fn()
+        request_id = event.get("request_id")
+        if not isinstance(request_id, str) or not request_id:
+            raise RemoteExperimentError(
+                "Clock synchronization request has no request ID"
+            )
+        controller_sent_seconds = self.monotonic_fn()
+        self._send_result(
+            "CLOCK_SYNC_RESPONSE",
+            {
+                "controller_received_monotonic_seconds": (
+                    controller_received_seconds
+                ),
+                "controller_sent_monotonic_seconds": controller_sent_seconds,
+            },
+            request_id=request_id,
+        )
 
     def _failure_result(self, error, base=None):
         if (
@@ -665,7 +731,9 @@ class SshExperimentController:
                 "Remote event campaign ID does not match the experiment"
             )
 
-        if event_name == "ACQUISITION_START_REQUEST":
+        if event_name == "CLOCK_SYNC_REQUEST":
+            self._handle_clock_sync_request(event)
+        elif event_name == "ACQUISITION_START_REQUEST":
             self._start_local_acquisition(event)
         elif event_name == "ACQUISITION_STOP_REQUEST":
             result = self._stop_local_acquisition()
@@ -674,7 +742,7 @@ class SshExperimentController:
             manifest = event.get("manifest")
             if not isinstance(manifest, dict):
                 raise RemoteExperimentError(
-                    "Jetson returned an invalid manifest payload"
+                    "Remote board returned an invalid manifest payload"
                 )
             self.manifest = manifest
         else:
@@ -694,7 +762,7 @@ class SshExperimentController:
             raise RemoteExperimentError("SSH process pipes were not created")
         self.reader_thread = threading.Thread(
             target=self._read_stdout,
-            name="jetson-event-reader",
+                name="remote-board-event-reader",
             daemon=True,
         )
         self.reader_thread.start()
@@ -710,7 +778,7 @@ class SshExperimentController:
                     raw_line = ""
                 if isinstance(raw_line, Exception):
                     raise RemoteExperimentError(
-                        f"Failed to read Jetson stdout: {raw_line}"
+                        f"Failed to read remote board stdout: {raw_line}"
                     ) from raw_line
                 if raw_line is None:
                     reader_finished = True
@@ -719,14 +787,18 @@ class SshExperimentController:
                     try:
                         event = json.loads(line)
                     except json.JSONDecodeError:
-                        print(f"[jetson] {line}", file=sys.stderr, flush=True)
+                        print(
+                            f"[remote-board] {line}",
+                            file=sys.stderr,
+                            flush=True,
+                        )
                     else:
                         received_event = True
                         self._handle_event(event, raw_line)
 
                 if not received_event and self.monotonic_fn() >= startup_deadline:
                     raise RemoteExperimentError(
-                        "Timed out waiting for the first Jetson event"
+                        "Timed out waiting for the first remote board event"
                     )
                 if reader_finished and self.process.poll() is not None:
                     break
@@ -736,22 +808,23 @@ class SshExperimentController:
                 self.manifest = self._fetch_remote_manifest()
             if self.manifest is None:
                 raise RemoteExperimentError(
-                    "Jetson exited without returning its JSON manifest "
+                    "Remote board exited without returning its JSON manifest "
                     f"(SSH exit code {return_code})"
                 )
             manifest_status = self.manifest.get("status")
             if manifest_status not in ("COMPLETE", "FAILED"):
                 raise RemoteExperimentError(
-                    f"Jetson returned invalid manifest status {manifest_status!r}"
+                    "Remote board returned invalid manifest status "
+                    f"{manifest_status!r}"
                 )
             if manifest_status == "COMPLETE" and return_code != 0:
                 raise RemoteExperimentError(
-                    "Jetson reported a complete campaign but SSH exited with "
+                    "Remote board reported a complete campaign but SSH exited with "
                     f"code {return_code}"
                 )
             if manifest_status == "FAILED" and return_code == 0:
                 raise RemoteExperimentError(
-                    "Jetson returned a failed manifest with SSH exit code 0"
+                    "Remote board returned a failed manifest with SSH exit code 0"
                 )
             return self.manifest
         finally:
@@ -779,7 +852,7 @@ class SshExperimentController:
 def persist_local_manifest(manifest, output_directory):
     campaign_id = manifest.get("campaign_id")
     if not campaign_id:
-        raise RemoteExperimentError("Jetson manifest has no campaign_id")
+        raise RemoteExperimentError("Remote board manifest has no campaign_id")
     output_directory = Path(output_directory)
     output_directory.mkdir(parents=True, exist_ok=True)
     path = output_directory / f"{campaign_id}.json"
@@ -920,7 +993,20 @@ def build_argument_parser():
     parser.add_argument("--calibration_initial_inferences", type=int, default=10)
     parser.add_argument("--calibration_target_seconds", type=float, default=0.5)
     parser.add_argument("--calibration_repetitions", type=int, default=5)
+    parser.add_argument("--calibration-sizing-max-attempts", type=int, default=3)
+    parser.add_argument("--calibration-duration-tolerance", type=float, default=0.20)
     parser.add_argument("--max_relative_mad", type=float, default=0.15)
+    parser.add_argument("--burst-duration-margin", type=float, default=1.2)
+    parser.add_argument("--validation-repetitions", type=int, default=3)
+    parser.add_argument("--validation-max-rounds", type=int, default=3)
+    parser.add_argument("--validation-safety-margin", type=float, default=1.1)
+    parser.add_argument("--validation-cooldown-seconds", type=float, default=None)
+    parser.add_argument("--clock-sync-exchanges", type=int, default=10)
+    parser.add_argument(
+        "--max-clock-uncertainty-fraction",
+        type=float,
+        default=0.50,
+    )
     parser.add_argument("--max_calibration_inferences", type=int, default=1_000_000)
     parser.add_argument("--leading_idle_seconds", type=float, default=5.0)
     parser.add_argument("--trailing_idle_seconds", type=float, default=5.0)
@@ -1022,7 +1108,16 @@ def build_local_manager(args, acquisition_controller):
         calibration_initial_inferences=args.calibration_initial_inferences,
         calibration_target_seconds=args.calibration_target_seconds,
         calibration_repetitions=args.calibration_repetitions,
+        calibration_sizing_max_attempts=args.calibration_sizing_max_attempts,
+        calibration_duration_tolerance=args.calibration_duration_tolerance,
         max_relative_mad=args.max_relative_mad,
+        burst_duration_margin=args.burst_duration_margin,
+        validation_repetitions=args.validation_repetitions,
+        validation_max_rounds=args.validation_max_rounds,
+        validation_safety_margin=args.validation_safety_margin,
+        validation_cooldown_seconds=args.validation_cooldown_seconds,
+        clock_sync_exchanges=args.clock_sync_exchanges,
+        max_clock_uncertainty_fraction=args.max_clock_uncertainty_fraction,
         max_calibration_inferences=args.max_calibration_inferences,
         leading_idle_seconds=args.leading_idle_seconds,
         trailing_idle_seconds=args.trailing_idle_seconds,

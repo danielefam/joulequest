@@ -305,7 +305,16 @@ class SshExperimentControllerTests(unittest.TestCase):
             "calibration_initial_inferences": 10,
             "calibration_target_seconds": 0.5,
             "calibration_repetitions": 4,
+            "calibration_sizing_max_attempts": 3,
+            "calibration_duration_tolerance": 0.20,
             "max_relative_mad": 0.15,
+            "burst_duration_margin": 1.2,
+            "validation_repetitions": 3,
+            "validation_max_rounds": 3,
+            "validation_safety_margin": 1.1,
+            "validation_cooldown_seconds": None,
+            "clock_sync_exchanges": 10,
+            "max_clock_uncertainty_fraction": 0.10,
             "max_calibration_inferences": 1_000_000,
             "leading_idle_seconds": 5.0,
             "trailing_idle_seconds": 5.0,
@@ -348,7 +357,7 @@ class SshExperimentControllerTests(unittest.TestCase):
             "runner_host": "bench@inference-host",
             "remote_directory": "/srv/benchmark",
             "remote_python": "python3",
-            "remote_manifest_directory": "measurements_jetson",
+            "remote_manifest_directory": "measurements_board",
             "ssh_options": ["ProxyJump=relay@jump-host"],
             "acquisition_controller": acquisition,
             "startup_timeout_seconds": 1.0,
@@ -401,6 +410,43 @@ class SshExperimentControllerTests(unittest.TestCase):
         self.assertEqual(command[-2], "bench@inference-host")
         self.assertIn("--stdio_acquisition", command[-1])
         self.assertIn("--backend cuda", command[-1])
+        self.assertIn("--burst-duration-margin 1.2", command[-1])
+        self.assertIn("--validation-repetitions 3", command[-1])
+        self.assertIn("--validation-safety-margin 1.1", command[-1])
+        self.assertIn("--clock-sync-exchanges 10", command[-1])
+        self.assertIn("--max-clock-uncertainty-fraction 0.1", command[-1])
+
+    def test_clock_sync_request_is_timestamped_and_echoes_request_id(self):
+        factory = FakeSshProcessFactory([])
+        monotonic_values = iter([20.002, 20.003])
+        controller = self._controller(
+            Mock(),
+            factory,
+            monotonic_fn=lambda: next(monotonic_values),
+        )
+        controller.process = factory(["ssh"])
+
+        controller._handle_event(
+            acquisition_event(
+                "CLOCK_SYNC_REQUEST",
+                "campaign-sync",
+                request_id="pre:1",
+                round="pre",
+            ),
+            "",
+        )
+
+        response = json.loads(controller.process.stdin.lines[0])
+        self.assertEqual(response["command"], "CLOCK_SYNC_RESPONSE")
+        self.assertEqual(response["request_id"], "pre:1")
+        self.assertEqual(
+            response["result"]["controller_received_monotonic_seconds"],
+            20.002,
+        )
+        self.assertEqual(
+            response["result"]["controller_sent_monotonic_seconds"],
+            20.003,
+        )
 
     def test_local_logger_start_failure_is_reported_to_jetson(self):
         campaign_id = "campaign-remote-failed"
@@ -496,7 +542,7 @@ class SshExperimentControllerTests(unittest.TestCase):
         self.assertEqual(returned, failed_manifest)
         fetch.assert_called_once()
         self.assertIn(
-            "measurements_jetson/campaign-fallback.json",
+            "measurements_board/campaign-fallback.json",
             fetch.call_args.args[0][-1],
         )
 
@@ -510,7 +556,7 @@ class SshExperimentControllerTests(unittest.TestCase):
         self.assertIn("ProxyJump=relay@jump-host", command)
         self.assertEqual(command[-2], "bench@inference-host")
         self.assertIn(
-            "rm -f -- measurements_jetson/campaign-cleanup.json",
+            "rm -f -- measurements_board/campaign-cleanup.json",
             command[-1],
         )
 
@@ -581,6 +627,18 @@ class SshExperimentControllerTests(unittest.TestCase):
                     **fields,
                 }), flush=True)
 
+            def synchronize(round_name):
+                request_id = round_name + ":1"
+                emit(
+                    "CLOCK_SYNC_REQUEST",
+                    round=round_name,
+                    request_id=request_id,
+                )
+                response = json.loads(sys.stdin.readline())
+                assert response["command"] == "CLOCK_SYNC_RESPONSE"
+                assert response["request_id"] == request_id
+
+            synchronize("pre_acquisition")
             emit(
                 "ACQUISITION_START_REQUEST",
                 sampling_rate_hz=100.0,
@@ -594,6 +652,7 @@ class SshExperimentControllerTests(unittest.TestCase):
             emit("ACQUISITION_STOP_REQUEST")
             stopped = json.loads(sys.stdin.readline())
             assert stopped["command"] == "ACQUISITION_STOPPED"
+            synchronize("post_acquisition")
             manifest = {
                 "campaign_id": campaign_id,
                 "status": "COMPLETE",
@@ -662,7 +721,16 @@ class CommandResultTests(unittest.TestCase):
             calibration_initial_inferences=2,
             calibration_target_seconds=0.1,
             calibration_repetitions=4,
+            calibration_sizing_max_attempts=3,
+            calibration_duration_tolerance=0.20,
             max_relative_mad=0.15,
+            burst_duration_margin=1.2,
+            validation_repetitions=3,
+            validation_max_rounds=3,
+            validation_safety_margin=1.1,
+            validation_cooldown_seconds=0.0,
+            clock_sync_exchanges=10,
+            max_clock_uncertainty_fraction=0.10,
             max_calibration_inferences=1000,
             leading_idle_seconds=0.0,
             trailing_idle_seconds=0.0,

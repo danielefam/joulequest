@@ -1,345 +1,691 @@
-# Import Required Libraries
-import pandas as pd
-import matplotlib.pyplot as plt
-from scipy.signal import medfilt
-from scipy.signal import butter, filtfilt
-from skimage.filters import threshold_otsu
+"""Robustly clean INA226 traces and identify measurement phases.
+
+Manifest burst timestamps are preferred over signal-only classification because
+they describe when inference actually ran.  Preparation is inferred from an
+elevated pre-burst signal; one-time model loading occurs before acquisition and
+cannot be observed in the CSV.
+"""
+
 import argparse
-import numpy as np
 import json
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
-try:
-    from .artifact_paths import get_manifest_file_path
-except ImportError:
-    from artifact_paths import get_manifest_file_path
+import numpy as np
+import pandas as pd
+from skimage.filters import threshold_otsu
 
 
-def load_data(csv_path):
-    """
-    Load data from a CSV file.
-    """
-    df = pd.read_csv(csv_path)
-    return df
+POWER_COLUMN = "EVM1 POWER Results (W)"
+ELAPSED_COLUMN = "Elapsed Time (s)"
+TIMESTAMP_COLUMN = "Timestamp UTC"
 
-def median_filter_data(data, kernel_size=11):
-    """
-    Apply median filtering to remove outliers.
-    """
-    return medfilt(data, kernel_size=kernel_size)   
 
-def butter_lowpass(cutoff, fs, order=5):
-    """ 
-    Create a low-pass Butterworth filter.
-    cutoff: Cutoff frequency in Hz
-    fs: Sampling frequency in Hz
-    order: Order of the filter
-    """
-    nyq = 0.5 * fs  # Nyquist frequency
-    normal_cutoff = cutoff / nyq
-    b, a = butter(order, normal_cutoff, btype='low', analog=False)
-    return b, a
+@dataclass(frozen=True)
+class ProcessingConfig:
+    """Tunable durations are expressed in seconds, not sample counts."""
 
-def lowpass_filter(data, cutoff, fs, order=5):
-    """
-    Apply a low-pass Butterworth filter to the data.
-    """
-    b, a = butter_lowpass(cutoff, fs, order=order)
-    y = filtfilt(b, a, data)
-    return y
+    sampling_rate_hz: float | None = None
+    hampel_window_seconds: float = 0.21
+    hampel_sigma: float = 4.5
+    smoothing_window_seconds: float = 0.09
+    minimum_active_seconds: float = 0.10
+    minimum_idle_seconds: float = 0.05
+    maximum_preparation_seconds: float = 2.0
+    max_clock_uncertainty_fraction: float = 0.50
 
-def average_data(df,window_size=30):
-    """
-    Smooth the data using a rolling average.
-    """
-    return df.rolling(window=window_size, center=True).mean()
+    def __post_init__(self):
+        positive_values = {
+            "hampel_window_seconds": self.hampel_window_seconds,
+            "hampel_sigma": self.hampel_sigma,
+            "smoothing_window_seconds": self.smoothing_window_seconds,
+            "minimum_active_seconds": self.minimum_active_seconds,
+            "minimum_idle_seconds": self.minimum_idle_seconds,
+            "maximum_preparation_seconds": self.maximum_preparation_seconds,
+            "max_clock_uncertainty_fraction": (
+                self.max_clock_uncertainty_fraction
+            ),
+        }
+        if self.sampling_rate_hz is not None:
+            positive_values["sampling_rate_hz"] = self.sampling_rate_hz
+        invalid = [name for name, value in positive_values.items() if value <= 0]
+        if invalid:
+            raise ValueError(
+                "Configuration values must be positive: "
+                + ", ".join(invalid)
+            )
 
-def get_threshold(data):
-    """
-    Compute Otsu's threshold for the data.
-    """
-    return threshold_otsu(data) 
 
-def compute_means_variances(df, threshold, sampling_interval, inferences_per_cycle):
-    """
-    Compute means and variances above and below a threshold.
-    """
-    # # Above threshold
-    # above_threshold = df[df > threshold]
-    # average_power_active = above_threshold.mean()
-    # variance_active = above_threshold.var()
-    
-    # # Below threshold
-    # below_threshold = df[df < threshold]
-    # average_power_idle = below_threshold.mean()
-    # variance_idle = below_threshold.var()
+@dataclass
+class ProcessingResult:
+    samples: pd.DataFrame
+    regions: pd.DataFrame
+    summary: dict
 
-    # sampling_interval = 0.1
 
-    # These flags indicate whether the first and last samples are active, 
-    # which affects how we identify active regions and their corresponding idle periods.
-    is_active_first = False
-    is_active_last = False
+def _odd_window(duration_seconds, sampling_rate_hz, minimum=3):
+    samples = max(minimum, int(round(duration_seconds * sampling_rate_hz)))
+    return samples if samples % 2 else samples + 1
 
-    #Identify active regions
-    df_clean = df["smoothed"].dropna()
-    is_active = df_clean > threshold
 
-    #Identify transiton (start and end of each regions)
-    change_points = np.diff(is_active.astype(int))
+def _load_manifest(csv_path, manifest_path=None):
+    path = (
+        Path(manifest_path)
+        if manifest_path
+        else Path(csv_path).with_suffix(".json")
+    )
+    if not path.is_file():
+        return None, None
+    with path.open(encoding="utf-8") as manifest_file:
+        return json.load(manifest_file), path
 
-    # Identify start and end indices of active periods 
-    # (transitions from inactive to active and vice versa)
-    # and store them in two list
-    start_indices = np.where(change_points == 1)[0] + 1
-    end_indices = np.where(change_points == -1)[0] + 1
 
-    # If the first sample is active
-    if is_active.iloc[0]:
-        start_indices = np.insert(start_indices, 0, 0)
-        is_active_first = True
+def _sampling_rate(data, manifest, override):
+    if override is not None:
+        return float(override), "command line"
+    if manifest is not None:
+        acquisition = manifest.get("acquisition", {})
+        rate = acquisition.get("achieved_sampling_rate_hz")
+        if rate is None:
+            rate = acquisition.get("sampling_rate_hz")
+        if rate is not None and float(rate) > 0:
+            return float(rate), "manifest"
+    if ELAPSED_COLUMN in data:
+        elapsed = pd.to_numeric(data[ELAPSED_COLUMN], errors="coerce")
+        intervals = elapsed.diff().dropna()
+        intervals = intervals[intervals > 0]
+        if not intervals.empty:
+            return float(1.0 / intervals.median()), "CSV elapsed time"
+    raise ValueError(
+        "Sampling rate is unavailable; provide --sampling-rate-hz or a manifest"
+    )
 
-    # If the last sample is active
-    if is_active.iloc[-1]:
-        end_indices = np.append(end_indices, len(df.values))
-        is_active_last = True
-    
-    # filter out fan active regions
-    durations = [(end - start) * sampling_interval for start, end in zip(start_indices, end_indices)]
-    # Set a max expected duration threshold (e.g., 2× typical inference duration)
-    expected_duration = np.median(durations)
-    #max_duration = expected_duration * 1.5
 
-    regions =[]
-    # A region is defined as a contiguous segment of active samples. 
-    # We will compute the average power and variance for each active region, as well as the corresponding idle periods before and after it.
-    # Intra means inside a region (active or idle indifferently)
-    # Extra means taking into account all the regions
+def _time_axis(data, sampling_rate_hz):
+    if ELAPSED_COLUMN in data:
+        elapsed = pd.to_numeric(data[ELAPSED_COLUMN], errors="coerce")
+        if elapsed.notna().all() and elapsed.is_monotonic_increasing:
+            return elapsed
+    if "Sample" not in data:
+        raise ValueError(f"CSV must contain '{ELAPSED_COLUMN}' or 'Sample'")
+    samples = pd.to_numeric(data["Sample"], errors="coerce")
+    if samples.isna().any():
+        raise ValueError("Sample contains non-numeric values")
+    return (samples - samples.iloc[0]) / sampling_rate_hz
 
-    for i,(start, end) in enumerate(zip(start_indices, end_indices)):
-        
-        ##################################
-        # ACTIVE COMPUTATION
-        ##################################
 
-        duration = (end - start) * sampling_interval
-        # if duration > max_duration:
-        #     print(f"Skipping region {i} from {start} to {end} due to excessive duration: {duration:.2f}s")
-        #     continue
+def _parse_utc_timestamps(values):
+    try:
+        return pd.to_datetime(values, utc=True, errors="coerce", format="mixed")
+    except TypeError:
+        return values.map(
+            lambda value: pd.to_datetime(value, utc=True, errors="coerce")
+        )
 
-        intra_activ_avg = df_clean.iloc[start:end].mean()
-        intra_activ_var = df_clean.iloc[start:end].var()
-        #energy_active = average_power_active * duration
 
-    
-        ##################################
-        # IDLE COMPUTATION
-        ##################################
-        # Get idle region before
-        if i == 0 and is_active_first:
-            idle_before = None
-        else:
-            if i == 0:
-                prev_end = 0
+def _hampel_clean(power, window, sigma):
+    local_median = power.rolling(window, center=True, min_periods=1).median()
+    absolute_deviation = (power - local_median).abs()
+    local_mad = absolute_deviation.rolling(
+        window, center=True, min_periods=1
+    ).median()
+    robust_scale = 1.4826 * local_mad
+    global_scale = 1.4826 * float(np.median(np.abs(power - power.median())))
+    fallback_scale = global_scale if global_scale > 0 else np.finfo(float).eps
+    robust_scale = robust_scale.mask(robust_scale <= 0, fallback_scale)
+    previous_value = power.shift(1)
+    next_value = power.shift(-1)
+    neighbors_agree = (
+        (previous_value - next_value).abs() <= 2.5 * robust_scale
+    ).fillna(False)
+    is_outlier = (absolute_deviation > sigma * robust_scale) & neighbors_agree
+    cleaned = power.mask(is_outlier).interpolate(limit_direction="both")
+    return cleaned, is_outlier
+
+
+def _run_bounds(mask):
+    values = np.asarray(mask, dtype=bool)
+    padded = np.pad(values.astype(np.int8), (1, 1))
+    changes = np.diff(padded)
+    starts = np.flatnonzero(changes == 1)
+    ends = np.flatnonzero(changes == -1)
+    return list(zip(starts, ends))
+
+
+def _remove_short_runs(mask, value, minimum_samples):
+    result = np.asarray(mask, dtype=bool).copy()
+    target = result if value else ~result
+    for start, end in _run_bounds(target):
+        if end - start < minimum_samples:
+            result[start:end] = not value
+    return result
+
+
+def _signal_active_mask(smoothed, threshold, sampling_rate_hz, config):
+    lower_values = smoothed[smoothed <= threshold]
+    upper_values = smoothed[smoothed > threshold]
+    if lower_values.empty or upper_values.empty:
+        raise ValueError(
+            "Power trace does not contain separable idle and active levels"
+        )
+
+    idle_level = float(lower_values.median())
+    active_level = float(upper_values.median())
+    level_gap = active_level - idle_level
+    lower_threshold = idle_level + 0.40 * level_gap
+    upper_threshold = idle_level + 0.60 * level_gap
+
+    active = np.zeros(len(smoothed), dtype=bool)
+    state = False
+    for index, value in enumerate(smoothed.to_numpy()):
+        if not state and value >= upper_threshold:
+            state = True
+        elif state and value <= lower_threshold:
+            state = False
+        active[index] = state
+
+    return active
+
+
+def _aligned_active_mask(time_axis, manifest, sampling_rate_hz, config):
+    threshold_seconds = (
+        config.max_clock_uncertainty_fraction / sampling_rate_hz
+    )
+    diagnostics = {
+        "status": "UNAVAILABLE",
+        "uncertainty_seconds": None,
+        "uncertainty_threshold_seconds": threshold_seconds,
+        "fallback_reason": None,
+    }
+    if manifest is None:
+        diagnostics["fallback_reason"] = "MANIFEST_UNAVAILABLE"
+        return None, diagnostics
+    if manifest.get("schema_version") != 2:
+        diagnostics["fallback_reason"] = "LEGACY_MANIFEST_NO_ALIGNMENT"
+        return None, diagnostics
+
+    alignment = manifest.get("acquisition", {}).get("clock_alignment")
+    if not isinstance(alignment, dict):
+        diagnostics["fallback_reason"] = "CLOCK_ALIGNMENT_UNAVAILABLE"
+        return None, diagnostics
+    diagnostics["status"] = alignment.get("status", "UNAVAILABLE")
+    diagnostics["fallback_reason"] = alignment.get("fallback_reason")
+    if diagnostics["status"] != "COMPLETE":
+        diagnostics["fallback_reason"] = (
+            diagnostics["fallback_reason"]
+            or "CLOCK_ALIGNMENT_NOT_COMPLETE"
+        )
+        return None, diagnostics
+    try:
+        uncertainty_seconds = float(alignment["uncertainty_seconds"])
+    except (KeyError, TypeError, ValueError):
+        diagnostics["fallback_reason"] = "CLOCK_UNCERTAINTY_UNAVAILABLE"
+        return None, diagnostics
+    diagnostics["uncertainty_seconds"] = uncertainty_seconds
+    if not np.isfinite(uncertainty_seconds) or uncertainty_seconds < 0:
+        diagnostics["fallback_reason"] = "CLOCK_UNCERTAINTY_INVALID"
+        return None, diagnostics
+    if uncertainty_seconds > threshold_seconds:
+        diagnostics["fallback_reason"] = "CLOCK_UNCERTAINTY_EXCEEDED"
+        return None, diagnostics
+
+    cycles = manifest.get("measurement", {}).get("cycles", [])
+    if not cycles:
+        diagnostics["fallback_reason"] = "ALIGNED_BURST_BOUNDS_UNAVAILABLE"
+        return None, diagnostics
+    times = np.asarray(time_axis, dtype=float)
+    if not np.isfinite(times).all() or np.any(np.diff(times) < 0):
+        diagnostics["fallback_reason"] = "CSV_ELAPSED_TIME_INVALID"
+        return None, diagnostics
+    active = np.zeros(len(times), dtype=bool)
+    for cycle in cycles:
+        try:
+            start = float(cycle["start_event"]["aligned_elapsed_seconds"])
+            end = float(cycle["end_event"]["aligned_elapsed_seconds"])
+        except (KeyError, TypeError, ValueError):
+            diagnostics["fallback_reason"] = "ALIGNED_BURST_BOUNDS_UNAVAILABLE"
+            return None, diagnostics
+        if not (
+            np.isfinite(start)
+            and np.isfinite(end)
+            and times[0] <= start < end <= times[-1]
+        ):
+            diagnostics["fallback_reason"] = "ALIGNED_BURST_BOUNDS_INVALID"
+            return None, diagnostics
+        active |= (times >= start) & (times <= end)
+    if not active.any() or len(_run_bounds(active)) != len(cycles):
+        diagnostics["fallback_reason"] = "ALIGNED_BURST_SAMPLES_INVALID"
+        return None, diagnostics
+    diagnostics["fallback_reason"] = None
+    return active, diagnostics
+
+
+def _aligned_preparation_mask(time_axis, manifest, active, config):
+    cycles = manifest.get("measurement", {}).get("cycles", [])
+    plan = manifest.get("plan", {})
+    if not cycles or "sleep_time_seconds" not in plan:
+        return None
+
+    times = np.asarray(time_axis, dtype=float)
+    maximum_duration = pd.to_timedelta(
+        config.maximum_preparation_seconds, unit="s"
+    )
+    preparation = np.zeros(len(times), dtype=bool)
+    previous_end = None
+    for cycle_index, cycle in enumerate(cycles):
+        try:
+            burst_start = float(
+                cycle["start_event"]["aligned_elapsed_seconds"]
+            )
+            if cycle_index == 0:
+                preparation_start = float(
+                    plan.get("leading_idle_seconds", 0.0)
+                )
             else:
-                prev_end = end_indices[i-1]
-            
-            idle_before = df_clean[prev_end:start]
+                preparation_start = previous_end + float(
+                    plan["sleep_time_seconds"]
+                )
+            previous_end = float(
+                cycle["end_event"]["aligned_elapsed_seconds"]
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
 
-        # Get idle region after
-        if i == len(start_indices) - 1 and is_active_last:
-            idle_after = None  # no next region
-        else:
-            if i == len(start_indices) - 1:
-                next_start = len(df) - 1
-            else: 
-                next_start = start_indices[i + 1]
-            idle_after = df_clean[end:next_start]
-
-        # Combine available idle segments
-        idle_segments = []
-        if idle_before is not None and not idle_before.empty:
-            idle_segments.append(idle_before)
-        if idle_after is not None and not idle_after.empty:
-            idle_segments.append(idle_after)
-
-        # Calculate idle power and energy if there are idle segmentss
-        if idle_segments:
-            idle_combined = pd.concat(idle_segments)
-            #idle_duration = len(idle_combined) * sampling_interval
-            
-            intra_idle_avg = idle_combined.mean()
-            intra_idle_var = idle_combined.var()
-
-            #idle_energy = idle_power * idle_duration
-
-        intra_power_avg= (intra_activ_avg - intra_idle_avg)
-        intra_power_var = (intra_activ_var + intra_idle_var)
-
-        intra_energy_avg = intra_power_avg * duration / inferences_per_cycle #divided by 10000 to have energy for one inference instead of 10000 inferences
-        intra_energy_var = intra_power_var * (duration/inferences_per_cycle)**2
-
-        regions.append({
-        'sampling_rate': sampling_interval,
-
-        'start_sample': start,
-        'end_sample': end,
-        'active_duration_s': duration,
-
-        'power_offset_W': intra_power_avg,
-        'avg_power_active_W': intra_activ_avg,
-        'avg_power_idle_W': intra_idle_avg,
-
-        'variance_power_offset_W2': intra_power_var,
-        'variance_power_active_W2': intra_activ_var,
-        'avg_power_idle_variance_W2': intra_idle_var,
-
-        'energy_J': intra_energy_avg,
-        'var_energy_J2': intra_energy_var
-    })
-    #regions contains data for one active regions    
-    #results aggregates data from all the regions
-    #num_regions = len(regions)
-
-    extra_power_avg = np.mean([r['power_offset_W'] for r in regions])
-    extra_power_var = np.var([r['power_offset_W'] for r in regions], ddof=1)
+        preparation_start = max(
+            preparation_start,
+            burst_start - maximum_duration.total_seconds(),
+        )
+        if preparation_start < burst_start:
+            preparation |= (times >= preparation_start) & (times < burst_start)
+    preparation &= ~np.asarray(active, dtype=bool)
+    return preparation if preparation.any() else None
 
 
-    total_duration = sum(r['active_duration_s'] for r in regions)
-    extra_energy_avg = np.sum([r["active_duration_s"]*r["energy_J"] for r in regions]) / total_duration 
-    #extra_energy_avg = np.mean([r['energy_J'] for r in regions])
-    extra_energy_var = np.var([r['energy_J'] for r in regions], ddof=1) 
+def _infer_preparation_mask(
+    smoothed, active, threshold, sampling_rate_hz, config
+):
+    idle_values = smoothed[~active]
+    if idle_values.empty:
+        return np.zeros(len(smoothed), dtype=bool)
+    idle_level = float(idle_values.median())
+    idle_mad = float(np.median(np.abs(idle_values - idle_level)))
+    noise_scale = max(1.4826 * idle_mad, np.finfo(float).eps)
+    preparation_threshold = idle_level + max(
+        4.0 * noise_scale, 0.15 * max(threshold - idle_level, 0.0)
+    )
+    elevated = (smoothed >= preparation_threshold).to_numpy() & ~active
+    maximum_samples = max(
+        1, round(config.maximum_preparation_seconds * sampling_rate_hz)
+    )
+    preparation = np.zeros(len(smoothed), dtype=bool)
 
-    #print("num_regions:",num_regions)
-    results = ({ "power_avg_W":extra_power_avg,
-                 "power_var_W2":extra_power_var,
-                
-                 "energy_avg_J":extra_energy_avg,
-                 "energy_var_J2":extra_energy_var,
-                 "region_count":len(regions),
-    })
+    previous_active_end = 0
+    for active_start, active_end in _run_bounds(active):
+        lower_bound = max(previous_active_end, active_start - maximum_samples)
+        cursor = active_start - 1
+        while cursor >= lower_bound and elevated[cursor]:
+            cursor -= 1
+        if cursor < active_start - 1:
+            preparation[cursor + 1 : active_start] = True
+        previous_active_end = active_end
+    return preparation
 
-    # Convert sums to averages    
-    # if num_regions > 0:
-    #     results = {k: v / num_regions for k, v in results.items()}
 
-    return results
+def _idle_baseline(samples, manifest):
+    times = samples["time_s"]
+    fallback_reason = None
+    safety_margin_seconds = None
+    if manifest is not None:
+        safety_margin_seconds = manifest.get("plan", {}).get(
+            "safety_margin_seconds"
+        )
+    try:
+        safety_margin_seconds = float(safety_margin_seconds)
+    except (TypeError, ValueError):
+        safety_margin_seconds = None
 
-def show_data(df, sampling_interval, filepath=None,save=False):
-    """
-    Display the smoothed data in a plot.
-    """
-    smoothed = df["smoothed"]
-    smoothed = smoothed.dropna()
-    # Align 'Sample' values with the smoothed data index
-    sample_aligned = df['Sample'].iloc[smoothed.index]
-
-    # time_sec = df['Sample'] * 0.1 # Assuming each sample corresponds to 0.1 seconds
-    time_sec = df['Sample'] * sampling_interval # Assuming each sample corresponds to 0.1 seconds
-    #time_sec = df['Sample'] / 1000 # Assuming 'Sample' is in milliseconds, convert to seconds
-    time_sec_smoothed = time_sec.iloc[smoothed.index]
-
-    plt.figure(figsize=(20, 5))
-    plt.plot(time_sec_smoothed, smoothed, linewidth=2.0)
-    plt.xlim(time_sec_smoothed.min(), time_sec_smoothed.max())
-    plt.xlabel('Time (s)')
-    plt.ylabel('Power consumption (W)')
-    plt.title('Power consumption in Watts (W)')
-    #plt.legend()
-    #plt.savefig("high_res_plot.svg",format='svg', dpi=300, bbox_inches='tight', transparent=False)
-    plt.grid(True)
-    if save:
-        plt.savefig(filepath, format='svg', dpi=300, bbox_inches='tight', transparent=False)
+    candidates = pd.Series(dtype=float)
+    source = "final measured safety margin"
+    if safety_margin_seconds is None or safety_margin_seconds <= 0:
+        fallback_reason = "SAFETY_MARGIN_UNAVAILABLE"
     else:
-        plt.show()
-    
-    plt.close() 
+        window_start = float(times.iloc[-1] - safety_margin_seconds)
+        candidates = samples.loc[
+            (times >= window_start) & (samples["phase"] == "idle"),
+            "power_clean_W",
+        ]
+        if len(candidates) < 2:
+            fallback_reason = "SAFETY_MARGIN_IDLE_SAMPLES_INSUFFICIENT"
+
+    if fallback_reason is not None:
+        source = "classified idle fallback"
+        candidates = samples.loc[
+            samples["phase"] == "idle", "power_clean_W"
+        ]
+
+    if candidates.empty:
+        return np.nan, {
+            "source": "unavailable",
+            "fallback_reason": fallback_reason or "IDLE_SAMPLES_UNAVAILABLE",
+            "sample_count": 0,
+            "start_time_s": None,
+            "end_time_s": None,
+            "power_median_W": None,
+            "power_mad_W": None,
+        }
+
+    baseline = float(candidates.median())
+    candidate_times = times.loc[candidates.index]
+    mad = float(np.median(np.abs(candidates.to_numpy() - baseline)))
+    return baseline, {
+        "source": source,
+        "fallback_reason": fallback_reason,
+        "sample_count": int(len(candidates)),
+        "start_time_s": float(candidate_times.iloc[0]),
+        "end_time_s": float(candidate_times.iloc[-1]),
+        "power_median_W": baseline,
+        "power_mad_W": mad,
+    }
 
 
-def get_average_power(df,inferences_per_cycle, kernel_size=11, fs=100, cutoff=0.1, window_size=30):
-    """
-    Main function to compute average power from the data.
-    """
-    # Apply median filtering
-    df["median_filtered"] = median_filter_data(df['EVM1 POWER Results (W)'], kernel_size)
+def _single_sample_duration(times, index, sampling_rate_hz):
+    if len(times) == 1:
+        return 1.0 / sampling_rate_hz
+    if index == 0:
+        return float(times.iloc[1] - times.iloc[0])
+    if index == len(times) - 1:
+        return float(times.iloc[-1] - times.iloc[-2])
+    return float((times.iloc[index + 1] - times.iloc[index - 1]) / 2.0)
 
-    # Apply low-pass filtering
-    df["lowpass_filtered"] = lowpass_filter(df['median_filtered'], cutoff, fs)
 
-    # Smooth the data using a rolling average
-    df["smoothed"] = average_data(df['lowpass_filtered'], window_size)
-    # Compute threshold
-    threshold = get_threshold(df['smoothed'].dropna().values)
-    results= compute_means_variances(df, threshold, 1/fs, inferences_per_cycle)
+def _build_regions(samples, sampling_rate_hz, manifest):
+    regions = []
+    inferences_per_cycle = None
+    if manifest is not None:
+        inferences_per_cycle = manifest.get("plan", {}).get(
+            "inferences_per_cycle"
+        )
 
-    return results
+    idle_baseline, baseline_metadata = _idle_baseline(samples, manifest)
+    for cycle, (start, end) in enumerate(
+        _run_bounds(samples["is_active"]), start=1
+    ):
+        active_power = samples["power_clean_W"].iloc[start:end]
+        active_times = samples["time_s"].iloc[start:end]
+        if len(active_times) > 1:
+            deltas = np.diff(active_times.to_numpy(dtype=float))
+            if np.any(deltas <= 0):
+                raise ValueError("Elapsed Time (s) must be strictly increasing")
+            duration = float(active_times.iloc[-1] - active_times.iloc[0])
+            interval_power = (
+                active_power.to_numpy(dtype=float)[:-1]
+                + active_power.to_numpy(dtype=float)[1:]
+            ) / 2.0
+            active_energy = float(np.sum(interval_power * deltas))
+            active_power_mean = active_energy / duration
+        else:
+            duration = _single_sample_duration(
+                samples["time_s"], start, sampling_rate_hz
+            )
+            active_power_mean = float(active_power.iloc[0])
+            active_energy = active_power_mean * duration
+        offset_power = float(active_power_mean - idle_baseline)
+        energy = float(active_energy - idle_baseline * duration)
+        regions.append(
+            {
+                "cycle": cycle,
+                "start_time_s": float(samples["time_s"].iloc[start]),
+                "end_time_s": float(samples["time_s"].iloc[end - 1]),
+                "duration_s": duration,
+                "active_power_mean_W": active_power_mean,
+                "idle_power_median_W": idle_baseline,
+                "idle_baseline_source": baseline_metadata["source"],
+                "power_offset_W": offset_power,
+                "energy_per_cycle_J": energy,
+                "energy_per_inference_J": (
+                    energy / inferences_per_cycle if inferences_per_cycle else np.nan
+                ),
+            }
+        )
+    return pd.DataFrame(regions), baseline_metadata
+
+
+def process_measurement(csv_path, manifest_path=None, config=None):
+    """Clean one CSV and return auditable sample, region, and summary tables."""
+
+    config = config or ProcessingConfig()
+    csv_path = Path(csv_path)
+    data = pd.read_csv(csv_path)
+    if POWER_COLUMN not in data:
+        raise ValueError(f"Missing column '{POWER_COLUMN}'")
+    power = pd.to_numeric(data[POWER_COLUMN], errors="coerce")
+    if power.isna().any() or not np.isfinite(power).all():
+        raise ValueError(
+            f"Column '{POWER_COLUMN}' must contain only finite numbers"
+        )
+
+    manifest, resolved_manifest_path = _load_manifest(csv_path, manifest_path)
+    sampling_rate_hz, rate_source = _sampling_rate(
+        data, manifest, config.sampling_rate_hz
+    )
+    hampel_window = _odd_window(config.hampel_window_seconds, sampling_rate_hz)
+    smoothing_window = _odd_window(
+        config.smoothing_window_seconds, sampling_rate_hz
+    )
+    cleaned, is_outlier = _hampel_clean(
+        power, hampel_window, config.hampel_sigma
+    )
+    smoothed = cleaned.rolling(
+        smoothing_window, center=True, min_periods=1
+    ).mean()
+    if np.allclose(smoothed, smoothed.iloc[0]):
+        raise ValueError("Power trace is constant; phases cannot be identified")
+    threshold = float(threshold_otsu(smoothed.to_numpy()))
+    time_axis = _time_axis(data, sampling_rate_hz)
+
+    manifest_active, alignment_diagnostics = _aligned_active_mask(
+        time_axis,
+        manifest,
+        sampling_rate_hz,
+        config,
+    )
+    if manifest_active is None:
+        active = _signal_active_mask(smoothed, threshold, sampling_rate_hz, config)
+        active_source = "signal hysteresis (Otsu fallback)"
+    else:
+        active = manifest_active
+        active_source = "synchronized manifest elapsed time"
+    preparation = (
+        _aligned_preparation_mask(time_axis, manifest, active, config)
+        if manifest_active is not None
+        else None
+    )
+    if preparation is None:
+        preparation = _infer_preparation_mask(
+            smoothed, active, threshold, sampling_rate_hz, config
+        )
+        preparation_source = "signal before each active region"
+    else:
+        preparation_source = "synchronized manifest lifecycle timing"
+
+    phase = np.full(len(data), "idle", dtype=object)
+    phase[preparation] = "input_and_parameter_preparation"
+    phase[active] = "active_inference"
+    samples = data.copy()
+    samples["time_s"] = time_axis
+    samples["power_raw_W"] = power
+    samples["power_clean_W"] = cleaned
+    samples["power_smoothed_W"] = smoothed
+    samples["is_outlier"] = is_outlier
+    samples["is_active"] = active
+    samples["phase"] = phase
+    regions, idle_baseline_metadata = _build_regions(
+        samples,
+        sampling_rate_hz,
+        manifest,
+    )
+
+    workload_policy = manifest.get("workload_policy", {}) if manifest else {}
+    summary = {
+        "csv_path": str(csv_path),
+        "manifest_path": (
+            str(resolved_manifest_path) if resolved_manifest_path else None
+        ),
+        "sampling_rate_hz": sampling_rate_hz,
+        "sampling_rate_source": rate_source,
+        "threshold_W": threshold,
+        "outlier_count": int(is_outlier.sum()),
+        "outlier_fraction": float(is_outlier.mean()),
+        "active_region_count": len(regions),
+        "active_classification_source": active_source,
+        "clock_alignment_status": alignment_diagnostics["status"],
+        "clock_alignment_uncertainty_seconds": alignment_diagnostics[
+            "uncertainty_seconds"
+        ],
+        "clock_alignment_threshold_seconds": alignment_diagnostics[
+            "uncertainty_threshold_seconds"
+        ],
+        "clock_alignment_fallback_reason": alignment_diagnostics[
+            "fallback_reason"
+        ],
+        "idle_baseline": idle_baseline_metadata,
+        "preparation_classification_source": preparation_source,
+        "preparation_phase": (
+            "inferred interval after the configured idle sleep and before "
+            "BURST_START; it can include a brief acquisition health check"
+        ),
+        "input_policy": workload_policy.get("input", "unknown"),
+        "parameter_policy": workload_policy.get("parameters", "unknown"),
+        "one_time_model_preparation_observed": False,
+        "one_time_model_preparation_note": (
+            "Model construction/loading, warm-up, and calibration occur before "
+            "INA226 acquisition starts and are not present in this CSV."
+        ),
+        "configuration": asdict(config),
+    }
+    return ProcessingResult(samples=samples, regions=regions, summary=summary)
+
+
+def plot_measurement(result, output_path, title=None):
+    """Save a clean trace with phase shading and visible rejected outliers."""
+
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Patch
+
+    samples = result.samples
+    figure, axis = plt.subplots(figsize=(15, 6))
+    axis.plot(
+        samples["time_s"],
+        samples["power_raw_W"],
+        color="0.72",
+        linewidth=0.15,
+        alpha=0.55,
+        label="Raw power",
+    )
+    axis.plot(
+        samples["time_s"],
+        samples["power_smoothed_W"],
+        color="#143642",
+        linewidth=0.35,
+        label="Cleaned power",
+    )
+    outliers = samples[samples["is_outlier"]]
+    if not outliers.empty:
+        axis.scatter(
+            outliers["time_s"],
+            outliers["power_raw_W"],
+            color="#c44900",
+            marker="x",
+            s=13,
+            linewidths=0.4,
+            label="Rejected outlier",
+            zorder=4,
+        )
+
+    phase_colors = {
+        "active_inference": ("#e9c46a", 0.22),
+        "input_and_parameter_preparation": ("#2a9d8f", 0.24),
+    }
+    for phase_name, (color, alpha) in phase_colors.items():
+        for start, end in _run_bounds(samples["phase"] == phase_name):
+            left = samples["time_s"].iloc[start]
+            right = samples["time_s"].iloc[min(end, len(samples) - 1)]
+            axis.axvspan(left, right, color=color, alpha=alpha, linewidth=0)
+
+    axis.axhline(
+        result.summary["threshold_W"],
+        color="#9b2226",
+        linestyle="--",
+        linewidth=0.4,
+        label="Signal threshold",
+    )
+    axis.set(
+        title=title or Path(result.summary["csv_path"]).stem,
+        xlabel="Time (s)",
+        ylabel="Power (W)",
+    )
+    axis.set_xlim(samples["time_s"].iloc[0], samples["time_s"].iloc[-1])
+    axis.grid(True, color="0.88", linewidth=0.3)
+    handles, labels = axis.get_legend_handles_labels()
+    handles.extend(
+        [
+            Patch(facecolor="#e9c46a", alpha=0.35, label="Active inference"),
+            Patch(
+                facecolor="#2a9d8f",
+                alpha=0.35,
+                label="Inferred input/parameter preparation",
+            ),
+        ]
+    )
+    labels.extend(["Active inference", "Inferred input/parameter preparation"])
+    axis.legend(handles, labels, loc="upper right", frameon=True, ncols=2)
+    figure.tight_layout()
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(output_path, dpi=200, bbox_inches="tight")
+    plt.close(figure)
+
+
+def save_result(result, output_dir, stem):
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    result.samples.to_csv(output_dir / f"{stem}_cleaned.csv", index=False)
+    result.regions.to_csv(output_dir / f"{stem}_regions.csv", index=False)
+    (output_dir / f"{stem}_summary.json").write_text(
+        json.dumps(result.summary, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    plot_measurement(result, output_dir / f"{stem}_cleaned.pdf")
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        description="Clean and annotate one INA226 measurement CSV."
+    )
+    parser.add_argument("csv_path", type=Path)
+    parser.add_argument("--manifest", type=Path)
+    parser.add_argument("--output-dir", type=Path, default=Path("cleaned_output"))
+    parser.add_argument("--sampling-rate-hz", type=float)
+    parser.add_argument(
+        "--max-clock-uncertainty-fraction",
+        type=float,
+        default=0.50,
+    )
+    return parser
+
 
 def main():
-    parser = argparse.ArgumentParser(
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument(
-         '-d', '--data', required=True, help='File path of .tflite file.')
-    parser.add_argument(
-         '-k', '--kernel_size', required=False, help='kernel size for median filtering',default=11)
-    parser.add_argument(
-         '-fs', '--freq', required=False, help='Sampling frequency (Hz)',default=100)
-    parser.add_argument(
-         '-cutoff', '--cutoff',required=False, help=' Cutoff frequency (Hz)',default=4)
-    parser.add_argument(
-         '-w', '--window', type=int,required=False,help='window size for rolling average', default=30)
-    parser.add_argument(
-        '-mp', '--manifest_dir_path', type=str, required=True, help='path to the directory of the manifests', default='measurements_manifest')
-    
-    args = parser.parse_args()
+    args = build_parser().parse_args()
+    config = ProcessingConfig(
+        sampling_rate_hz=args.sampling_rate_hz,
+        max_clock_uncertainty_fraction=(
+            args.max_clock_uncertainty_fraction
+        ),
+    )
+    result = process_measurement(args.csv_path, args.manifest, config)
+    save_result(result, args.output_dir, args.csv_path.stem)
+    print(json.dumps(result.summary, indent=2, sort_keys=True))
 
-
-    # Arguments retrieval
-    kernel_size = int(args.kernel_size)
-    fs = int(args.freq)
-    cutoff = float(args.cutoff)
-    window_size = int(args.window)
-    csv_path = args.data
-    measurements_manifest_dir_path = args.manifest_dir_path
-
-    sampling_interval = 1/fs
-    
-    manifest_file_path = get_manifest_file_path(measurements_manifest_dir_path, csv_path)
-    with open(manifest_file_path) as json_data:
-        measurement_manifest_json = json.load(json_data)
-    inferences_per_cycle = measurement_manifest_json['plan']['inferences_per_cycle']
-
-    # Load data from CSV file
-    df = load_data(csv_path)
-    print(f"Loaded data from {csv_path}")
-
-    # Apply median filtering
-    df["median_filtered"]=median_filter_data(df['EVM1 POWER Results (W)'],kernel_size)
-
-    # Apply low-pass filtering
-    df["lowpass_filtered"] = lowpass_filter(df['median_filtered'], cutoff, fs)
-
-    # Smooth the data using a rolling average
-    df["smoothed"] = average_data(df['lowpass_filtered'], window_size)
-
-    # Compute threshold
-    threshold = get_threshold(df['smoothed'].dropna().values)
-    print("Threshold value:", threshold)
-
-    #average_power_active,variance_active,average_power_idle,variance_idle= compute_means_variances(df['smoothed'], threshold)
-    results = compute_means_variances(df, threshold, sampling_interval, inferences_per_cycle)
-
-    print(f"Variance (active state, > threshold): {results['power_var_W2']:.5f} W²")
-    print(f"Average power (active state, > threshold): {results['power_avg_W']:.5f} W")
-    # print(f"Variance (idle state, < threshold): {results['avg_power_idle_variance_W2']:.5f} W²")
-    # print(f"Average power (idle state, < threshold): {results['avg_power_idle_W']:.5f} W")
-    print(f"Energy (J): {results['energy_avg_J']:.5f} J")
-    print(f"Energy variance (J²): {results['energy_var_J2']:.5f} J²")
-
-    #print("Final Results: average:", results['power_offset_W'])
-    #print("Final Results: variance:", variance_active -  variance_idle)
-
-    # Show the data
-    show_data(df, sampling_interval)
 
 if __name__ == "__main__":
     main()

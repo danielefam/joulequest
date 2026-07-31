@@ -1,6 +1,6 @@
 # Adaptive Clean-Burst Measurement Protocol
 
-**Implementation status:** automated direct-serial acquisition, 2026-07-23
+**Implementation status:** automated direct-serial acquisition with validated burst sizing, 2026-07-31
 **Validated priority:** PyTorch CPU/CUDA
 **Compatibility only:** Edge TPU remains available but is not part of the current validation campaign.
 
@@ -56,13 +56,14 @@ weights.
 The effective burst requirement is:
 
 $$
-T_{required}=\max\left(T_{target},\frac{N_{samples,min}}{f_s}\right)
+T_{required}=m\max\left(T_{target},\frac{N_{samples,min}}{f_s}\right)
 $$
 
 where:
 
 - $N_{samples,min}$ is `min_active_samples`;
 - $f_s$ is `sampling_rate_hz` in samples per second.
+- $m$ is `burst_duration_margin`, with default value $1.2$.
 
 After calibration estimates steady-state per-inference latency $t_{inference}$, the measured inference count is:
 
@@ -78,16 +79,49 @@ Calibration happens after warm-up and before INA226 acquisition.
 
 1. Run a small sizing pilot (`calibration_initial_inferences`).
 2. Scale the batch count toward `calibration_target_seconds`.
-3. Run `calibration_repetitions` batches, changing parameters and input before
+3. Measure and rescale the batch up to `calibration_sizing_max_attempts` times
+   until its duration is within `calibration_duration_tolerance` of the target.
+4. Run `calibration_repetitions` batches, changing parameters and input before
    each batch.
-4. Discard the first full calibration batch as an additional stabilization guard.
-5. Compute per-inference latency from the retained batches.
-6. Use the median latency as the stable estimate.
-7. Reject calibration if either relative median absolute deviation or coefficient of variation exceeds `max_relative_mad`.
+5. Reuse the final sizing attempt as the first discarded calibration batch.
+6. Compute per-inference latency from the retained batches.
+7. Use the median latency as the initial stable estimate.
+8. Compare relative median absolute deviation and coefficient of variation with
+  `max_relative_mad`.
 
-The default calibration target is 0.5 s per batch, with five batches total. The first is discarded and four are retained. The batch count is capped by `max_calibration_inferences` to avoid an unbounded sizing decision.
+An unstable calibration no longer aborts the campaign. Its median latency still
+sizes the burst, `CALIBRATION_UNSTABLE` is recorded, and the completed capture
+is retained with `quality_status: REVIEW`.
 
-## 5. Sampling-rate policy
+The default calibration target is 0.5 s per batch, with five batches total. The first is discarded and four are retained. The batch count is capped by `max_calibration_inferences` to avoid an unbounded sizing decision. Failure to converge within the sizing attempts records `CALIBRATION_SIZING_NOT_CONVERGED`.
+
+## 5. Pre-acquisition burst validation
+
+The latency median produces an initial inference count, but it is not trusted
+as the final plan. Before `READY`, the runner executes three excluded bursts
+with that exact count. Each burst receives a fresh workload state and the same
+cooldown used between measured cycles. The shortest observed duration must
+satisfy $T_{required}$.
+
+When validation fails, automatic sizing applies:
+
+$$
+N_{next}=\left\lceil
+N_{current}\frac{T_{required}}{T_{validation,min}}m_v
+\right\rceil
+$$
+
+where $m_v$ is `validation_safety_margin`, default $1.1$. The corrected count is
+validated again, for at most `validation_max_rounds` rounds. A manual override
+is never silently changed: it fails before acquisition when its measured
+duration is insufficient. Failure to validate an automatic count also stops
+before acquisition rather than producing knowingly under-resolved regions.
+
+The manifest records all excluded attempts under `calibration.sizing_attempts`
+and `burst_validation.rounds`. The final count remains fixed for every measured
+cycle, so energy normalization and cycle comparability are unchanged.
+
+## 6. Sampling-rate policy
 
 The current verified campaign rate is 10 Hz. The runner accepts `sampling_rate_hz` so the rate can be changed after hardware testing, but it does not automatically select a different sensor rate for every layer.
 
@@ -100,7 +134,7 @@ Preferred policy:
 
 A fixed campaign rate keeps filter configuration and measurements comparable. Dynamic sampling rates should be introduced only if bench validation proves that no single fixed rate supports both the fastest and slowest workloads.
 
-## 6. Automated acquisition sequence
+## 7. Automated acquisition sequence
 
 Use `automated_measurement.py` on the PC physically connected to the TI-SCB.
 The inference host is selected with `--runner-host` and reached through
@@ -112,23 +146,28 @@ non-interactive SSH. No interaction is required after the command starts.
 3. The Jetson executes warm-up, cooldown, and calibration while acquisition is
    stopped.
 4. The Jetson selects `inferences_per_cycle`, writes its manifest in `READY`
-   state, and emits `READY` followed by `ACQUISITION_START_REQUEST`.
-5. The PC launches its local `ina226_serial_logger.py` child process.
-6. The PC configures and verifies the INA226 calibration register, creates the
-  CSV, flushes the first complete sample, and acknowledges the Jetson.
-7. Only after that acknowledgement does the Jetson begin
-  `leading_idle_seconds`.
-8. The Jetson executes measured cycles with idle intervals only between cycles.
-9. The Jetson records `trailing_idle_seconds`, then an additional idle
-  `safety_margin_seconds`.
-10. The Jetson emits `ACQUISITION_STOP_REQUEST` and waits. The PC requests
+   state, and emits `READY`.
+5. The hosts perform ten monotonic clock exchanges and retain the minimum-RTT
+   observation from the pre-acquisition round.
+6. The Jetson emits `ACQUISITION_START_REQUEST`, and the PC launches its local
+   `ina226_serial_logger.py` child process.
+7. The PC configures and verifies the INA226 calibration register, creates the
+   CSV, flushes the first complete sample, and acknowledges the Jetson.
+8. Only after that acknowledgement does the Jetson begin
+   `leading_idle_seconds`.
+9. The Jetson executes measured cycles with idle intervals only between cycles.
+10. The Jetson records `trailing_idle_seconds`, then an additional idle
+    `safety_margin_seconds`.
+11. The Jetson emits `ACQUISITION_STOP_REQUEST` and waits. The PC requests
    cooperative logger shutdown and waits for CSV and serial-port cleanup.
-11. The PC acknowledges the stopped logger. Only then does the Jetson write its
-   final manifest and send it through SSH.
-12. The PC saves that manifest beside the CSV and prints the final
-  `AUTOMATED_MEASUREMENT_RESULT` JSON record.
-13. After the local manifest has been saved atomically, the PC removes the
-  remote manifest to conserve storage on the inference board.
+12. The PC acknowledges the stopped logger, and the hosts perform a second
+    minimum-RTT synchronization round to measure drift across the capture.
+13. The Jetson translates burst events into logger elapsed time, writes its
+    schema-v2 manifest, and sends it through SSH.
+14. The PC saves that manifest beside the CSV and prints the final
+    `AUTOMATED_MEASUREMENT_RESULT` JSON record.
+15. After the local manifest has been saved atomically, the PC removes the
+    remote manifest to conserve storage on the inference board.
 
 ```bash
 python automated_measurement.py \
@@ -195,7 +234,7 @@ python run_manager.py \
 
 An explicit `--inferences_per_cycle` remains available for controlled experiments. The runner rejects an override when its estimated duration would contain fewer than `min_active_samples`.
 
-## 7. Capture planning
+## 8. Capture planning
 
 The `READY` event reports acquisition duration and sample count using:
 
@@ -216,7 +255,7 @@ acquisition safety margin. Automated acquisition records that safety margin as
 additional idle baseline before stopping. The manual workflow leaves margin
 handling to the operator.
 
-## 8. Structured output and manifest
+## 9. Structured output and manifest
 
 Console events are one-line JSON records:
 
@@ -235,11 +274,11 @@ Automated artifacts are colocated and use the campaign ID as their exact stem:
 <output-directory>/<campaign_id>.json
 ```
 
-The manifest keeps `schema_version: 1` and adds an `acquisition` object with the
-authoritative CSV path, requested serial/sensor settings, actual port, readiness
-and completion timestamps, capture duration, sample count, achieved rate,
-deadline misses, stop reason, status, and failure details. A manifest also
-distinguishes:
+Automated manifests use `schema_version: 2` and include an `acquisition` object
+with the authoritative CSV path, requested serial/sensor settings, actual port,
+readiness and completion timestamps, capture duration, sample count, achieved
+rate, deadline misses, clock alignment, stop reason, status, and failure
+details. A manifest also distinguishes:
 
 - excluded warm-up work;
 - excluded calibration work;
@@ -281,11 +320,14 @@ Automated command exit codes are:
 | `calibration_initial_inferences` |       inferences |                        10 | No                           | Calibration sizing pilot                                  |
 | `calibration_target_seconds`     |                s |                       0.5 | No                           | Desired timer-dominating batch duration                   |
 | `calibration_repetitions`        |          batches |                         5 | No                           | Full timing batches, including one discard                |
-| `max_relative_mad`               |            ratio |                      0.15 | No                           | Maximum accepted MAD or CV timing spread                  |
+| `max_relative_mad`               |            ratio |                      0.15 | No                           | MAD/CV review threshold; never discards a capture         |
+| `burst_duration_margin`          |            ratio |                       1.2 | Planning only                | Headroom above target/minimum sample duration             |
+| `clock_sync_exchanges`           |        exchanges |                        10 | No                           | Samples in each pre/post clock round                      |
+| `max_clock_uncertainty_fraction` | sample-period ratio |                    0.50 | Classification only          | Above this value processing uses Otsu                     |
 | `max_calibration_inferences`     |       inferences |                 1,000,000 | No                           | Safety cap for a calibration batch                        |
 | `leading_idle_seconds`           |                s |                         5 | Baseline only                | Idle baseline before first useful burst                   |
 | `trailing_idle_seconds`          |                s |                         5 | Baseline only                | Idle baseline after final useful burst                    |
-| `safety_margin_seconds`          |                s |                         2 | Acquisition only             | Extra requested capture capacity                          |
+| `safety_margin_seconds`          |                s |                         2 | Baseline only                | Final measured idle window used for energy baseline       |
 | `wait_for_acquisition`           |             flag |                     false | No                           | Pause at `READY` for manual GUI start                     |
 | `manifest_directory`             |             path |                      none | N/A                          | Manual-run JSON campaign metadata destination             |
 
@@ -295,11 +337,10 @@ the burst timer, while the complete sequence of forward passes is included.
 
 ## 10. Current limitations
 
-- Event timestamps are generated on the Jetson while CSV timestamps are
-  generated on the PC. They are not assumed to share a monotonic clock; pairing
-  uses the exact campaign-ID stem and explicit SSH handshakes instead.
-- CSV processing uses `plan.inferences_per_cycle`, but active-region detection
-  remains threshold-based rather than event-indexed.
-- Direct acquisition does not automatically segment CSV rows by burst event;
-  analysis still identifies active regions from the trace and manifest timing.
+- Schema-v2 automated acquisition translates remote monotonic events into the
+   logger elapsed-time domain. If uncertainty exceeds 50% of one sample period,
+  or metadata is missing, processing uses Otsu plus hysteresis without
+  discarding the capture.
+- Schema-v1 and manual captures do not have a verified monotonic mapping and
+  therefore use the same Otsu fallback.
 - TPU execution follows the common runner API but has not been validated in this implementation phase.

@@ -21,6 +21,12 @@ INA226 acquisition. After the measured cycles and idle guards, the Jetson asks
 the PC to stop acquisition before writing its final manifest. No interaction is
 required after starting the command.
 
+Automated runs use monotonic clock exchanges immediately before and after the
+capture. The resulting schema-v2 manifest translates each remote burst into
+the logger's `Elapsed Time (s)` domain. Processing uses those intervals only
+when alignment uncertainty is at most 50% of one sample period; otherwise it
+keeps the capture and automatically uses Otsu plus hysteresis.
+
 ```bash
 python automated_measurement.py \
   --connection-config measurement_hosts.local.json \
@@ -118,19 +124,28 @@ Choose the backend with `--backend`:
 
 These are the most useful settings:
 
-| Setting | Meaning | Default |
-| --- | --- | --- |
-| `--number_of_cycles` | Number of real measurement cycles | `5` |
-| `--sleep_time` | Pause, in seconds, between cycles | `10` |
-| `--target_burst_seconds` | Desired duration, in seconds, of each real cycle | `10` |
-| `--sampling_rate_hz` | INA226 samples per second | `10` |
-| `--wait_for_acquisition` | Stops and waits for you to start manual INA226 recording | off |
-| `--runner-host` | SSH destination running inference | none (single-host fallback) |
-| `--jump-host` | SSH host used to reach the inference host | none |
-| `--connection-config` | Ignored JSON containing SSH/remote settings | none |
-| `--remote-directory` | Jetson directory containing `run_manager.py` | `.` |
-| `--remote-manifest-directory` | Manifest directory on the Jetson | `measurements_jetson` |
-| `--keep-remote-manifest` | Keep the Jetson copy after local persistence | off |
+| Setting                         | Meaning                                                  | Default                     |
+| ------------------------------- | -------------------------------------------------------- | --------------------------- |
+| `--number_of_cycles`          | Number of real measurement cycles                        | `5`                       |
+| `--sleep_time`                | Pause, in seconds, between cycles                        | `10`                      |
+| `--target_burst_seconds`      | Desired duration, in seconds, of each real cycle         | `10`                      |
+| `--sampling_rate_hz`          | INA226 samples per second                                | `10`                      |
+| `--burst-duration-margin`     | Safety factor for automatic burst sizing                 | `1.2`                     |
+| `--calibration-sizing-max-attempts` | Attempts to reach the calibration batch duration   | `3`                       |
+| `--calibration-duration-tolerance` | Accepted relative calibration duration error        | `0.20`                    |
+| `--validation-repetitions`   | Excluded final-count validation bursts per round          | `3`                       |
+| `--validation-max-rounds`    | Maximum validation and correction rounds                  | `3`                       |
+| `--validation-safety-margin` | Extra inference-count margin after failed validation      | `1.1`                     |
+| `--validation-cooldown-seconds` | Pause before each validation burst; defaults to sleep  | unset                     |
+| `--clock-sync-exchanges`      | Exchanges in each pre/post synchronization round         | `10`                      |
+| `--max-clock-uncertainty-fraction` | Maximum uncertainty as a sample-period fraction    | `0.50`                    |
+| `--wait_for_acquisition`      | Stops and waits for you to start manual INA226 recording | off                         |
+| `--runner-host`               | SSH destination running inference                        | none (single-host fallback) |
+| `--jump-host`                 | SSH host used to reach the inference host                | none                        |
+| `--connection-config`         | Ignored JSON containing SSH/remote settings              | none                        |
+| `--remote-directory`          | Jetson directory containing `run_manager.py`             | `.`                       |
+| `--remote-manifest-directory` | Manifest directory on the Jetson                         | `measurements_jetson`     |
+| `--keep-remote-manifest`      | Keep the Jetson copy after local persistence             | off                         |
 
 The automated command accepts the same adaptive workload controls but does not
 accept `--wait_for_acquisition`, logger duration/sample limits, or overwrite.
@@ -155,6 +170,12 @@ On the PC connected to the TI-SCB, install pyserial:
 
 ```bash
 python -m pip install -r Docs/INA226EVM/requirements.txt
+```
+
+Result processing also requires pandas, scikit-image, and matplotlib:
+
+```bash
+python -m pip install pandas scikit-image matplotlib
 ```
 
 On the Jetson, use its JetPack-compatible PyTorch environment for CPU or CUDA.
@@ -231,24 +252,24 @@ that acquisition, and processes only manifests with `status: COMPLETE`.
 Incomplete CSV captures are reported and skipped rather than producing empty
 statistics.
 
-The default filter parameters are `kernel_size=7`, `cutoff=0.5 Hz`, and
-`window_size=41`. They were selected against the current 59-measurement CUDA
-campaign by minimizing the difference between detected active regions and the
-100 cycles recorded in each manifest. Override them when processing data from a
-different board or sampling profile:
+Schema-v2 manifests use synchronized elapsed-time intervals when their
+uncertainty passes the strict gate. Older schema-v1 data and poor/missing sync
+metadata use Otsu plus hysteresis and remain in the output. Energy is integrated
+with actual elapsed-time deltas after subtracting the median power from the
+final measured `safety_margin_seconds` window. If that window is unavailable,
+the processor retains the result and reports a classified-idle fallback.
 
 ```bash
 python processing_report/process_and_visualize.py \
   --data-dir measurements/runs/BOARD_LABEL \
   --output-dir measurements/Plot/BOARD_LABEL \
-  --kernel-size 7 \
-  --cutoff 4 \
-  --window-size 41
+  --max-clock-uncertainty-fraction 0.50
 ```
 
 The generated `summary.csv` includes model and campaign identity, quality
 status, achieved sampling rate, inference count, expected and detected active
-regions, threshold, power mean/variance, and energy mean/variance.
+regions, classifier source, clock uncertainty/fallback reason, idle-baseline
+source/statistics, threshold, power mean/variance, and energy mean/variance.
 
 ## More help
 

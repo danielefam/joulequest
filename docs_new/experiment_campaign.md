@@ -136,13 +136,13 @@ campaign parameters:
 | --- | ---: | --- |
 | `CONNECTION_CONFIG` | `measurement_hosts.local.json` | Ignored SSH/remote configuration |
 | `OUTPUT_ROOT` | `measurements/runs` | Parent directory for board campaigns |
-| `BACKEND` | `cuda` | `cpu`, `cuda`, or `tpu` |
-| `MODEL_ROOT` | `Models/CUDA` | Model/specification root on the inference host |
+| `BACKEND` | `cpu` | `cpu`, `cuda`, or `tpu` |
+| `MODEL_ROOT` | `Models/CPU` | Model/specification root on the inference host |
 | `LINEAR_MODEL_DIRECTORY` | `${MODEL_ROOT}/Linear` | Linear model directory |
 | `CONV_MODEL_DIRECTORY` | `${MODEL_ROOT}/Conv` | Conv model directory |
 | `MODEL_SUFFIX` | `.pt` | Filename suffix |
 | `NUMBER_OF_CYCLES` | `100` | Measured cycles per experiment |
-| `SLEEP_TIME` | `2` s | Idle time between measured cycles of one layer |
+| `SLEEP_TIME` | `3` s | Idle time between measured cycles of one layer |
 | `TARGET_BURST_SECONDS` | `0` s | Time requirement in addition to sample requirement |
 | `SAMPLING_RATE_HZ` | `100` Hz | Requested INA226 sampling rate |
 | `MIN_ACTIVE_SAMPLES` | `100` | Minimum active samples per cycle |
@@ -152,15 +152,24 @@ campaign parameters:
 | `CALIBRATION_INITIAL_INFERENCES` | `20` | Calibration sizing pilot count |
 | `CALIBRATION_TARGET_SECONDS` | `1` s | Target full calibration-batch duration |
 | `CALIBRATION_REPETITIONS` | `8` | Full calibration batches including one discard |
-| `MAX_RELATIVE_MAD` | `0.15` | Maximum accepted relative MAD and CV |
+| `CALIBRATION_SIZING_MAX_ATTEMPTS` | `3` | Attempts to make a calibration batch reach its target duration |
+| `CALIBRATION_DURATION_TOLERANCE` | `0.20` | Accepted relative calibration-duration error |
+| `MAX_RELATIVE_MAD` | `0.15` | MAD/CV threshold for `CALIBRATION_UNSTABLE`; capture continues |
+| `BURST_DURATION_MARGIN` | `1.2` | Automatic burst-duration safety factor |
+| `VALIDATION_REPETITIONS` | `3` | Excluded final-count validation bursts per round |
+| `VALIDATION_MAX_ROUNDS` | `3` | Maximum pre-acquisition correction rounds |
+| `VALIDATION_SAFETY_MARGIN` | `1.1` | Extra count factor after a failed validation round |
+| `VALIDATION_COOLDOWN_SECONDS` | empty | Use `SLEEP_TIME`, or set the pause before each validation burst |
+| `CLOCK_SYNC_EXCHANGES` | `10` | Exchanges in each pre/post clock round |
+| `MAX_CLOCK_UNCERTAINTY_FRACTION` | `0.50` | Above this sample-period fraction processing uses Otsu |
 | `MAX_CALIBRATION_INFERENCES` | `1000000` | Calibration batch safety cap |
 | `LEADING_IDLE_SECONDS` | `5` s | Baseline before the first measured cycle |
-| `TRAILING_IDLE_SECONDS` | `5` s | Baseline after the final measured cycle |
-| `SAFETY_MARGIN_SECONDS` | `2` s | Additional acquisition-only idle |
+| `TRAILING_IDLE_SECONDS` | `30` s | Measured cooldown after the final cycle |
+| `SAFETY_MARGIN_SECONDS` | `2` s | Final measured idle used as the energy baseline |
 | `SHUNT_OHMS` | `0.012` ohm | Installed shunt resistance |
 | `MAX_EXPECTED_CURRENT_A` | `5.0` A | Board/workload current range |
 | `INA226_PORT` | empty | Auto-detect one TI-SCB; set to force a port |
-| `EXPERIMENT_COOLDOWN_SECONDS` | `0` s | Board cooling time between two executed layer experiments |
+| `EXPERIMENT_COOLDOWN_SECONDS` | `20` s | Unmeasured board cooling between layer experiments |
 
 The matrix variables are:
 
