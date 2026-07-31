@@ -11,7 +11,7 @@ import pandas as pd
 try:
     from . import data_processing as dp
 except ImportError:
-    import processing_report.data_processing as dp
+    import data_processing as dp
 
 try:
     from .artifact_paths import get_manifest_file_path, load_measurement_metadata
@@ -178,7 +178,7 @@ def main():
     combined_figure.savefig(
         args.output_dir / "smoothed_power_comparison.pdf", format="pdf"
     )
-    plt.show()
+    # plt.show()
     plt.close(combined_figure)
 
     pd.DataFrame(summary_rows).to_csv(
