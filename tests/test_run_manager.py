@@ -89,6 +89,46 @@ class UnstableFakeRunner(FakeRunner):
         )
 
 
+class PilotRegimeShiftRunner(FakeRunner):
+    def run_burst(self, inference_count):
+        self.prepare_burst()
+        self.calls.append(inference_count)
+        latency_seconds = 0.01 if inference_count == 2 else 0.002
+        return BurstResult(
+            requested_inferences=inference_count,
+            executed_inferences=inference_count,
+            elapsed_seconds=inference_count * latency_seconds,
+        )
+
+    def run_prepared_burst(self, inference_count):
+        self.calls.append(inference_count)
+        return BurstResult(
+            requested_inferences=inference_count,
+            executed_inferences=inference_count,
+            elapsed_seconds=inference_count * 0.002,
+        )
+
+
+class FinalCountRegimeShiftRunner(FakeRunner):
+    def run_burst(self, inference_count):
+        self.prepare_burst()
+        self.calls.append(inference_count)
+        latency_seconds = 0.002 if inference_count >= 100 else 0.01
+        return BurstResult(
+            requested_inferences=inference_count,
+            executed_inferences=inference_count,
+            elapsed_seconds=inference_count * latency_seconds,
+        )
+
+    def run_prepared_burst(self, inference_count):
+        self.calls.append(inference_count)
+        return BurstResult(
+            requested_inferences=inference_count,
+            executed_inferences=inference_count,
+            elapsed_seconds=inference_count * 0.002,
+        )
+
+
 class FailingMeasuredRunner(FakeRunner):
     def __init__(self, model_path, device):
         super().__init__(model_path, device)
@@ -303,8 +343,14 @@ class StdioAcquisitionControllerTests(unittest.TestCase):
             calibration_initial_inferences=1,
             calibration_target_seconds=0.1,
             calibration_repetitions=2,
+            calibration_sizing_max_attempts=3,
+            calibration_duration_tolerance=0.20,
             max_relative_mad=0.15,
             burst_duration_margin=1.2,
+            validation_repetitions=3,
+            validation_max_rounds=3,
+            validation_safety_margin=1.1,
+            validation_cooldown_seconds=0.0,
             clock_sync_exchanges=10,
             max_clock_uncertainty_fraction=0.10,
             max_calibration_inferences=1000,
@@ -386,6 +432,8 @@ class RunManagerTests(unittest.TestCase):
             self.assertEqual(manifest["plan"]["inferences_per_cycle"], 120)
             self.assertEqual(manifest["plan"]["required_burst_seconds"], 1.2)
             self.assertEqual(manifest["plan"]["burst_duration_margin"], 1.2)
+            self.assertTrue(manifest["burst_validation"]["passed"])
+            self.assertFalse(manifest["burst_validation"]["adjusted"])
             self.assertEqual(
                 manifest["workload_policy"]["parameters"],
                 "fresh_per_burst",
@@ -399,18 +447,60 @@ class RunManagerTests(unittest.TestCase):
             )
             self.assertEqual(len(manifest["measurement"]["cycles"]), 2)
 
-            # Calls: one warm-up, one sizing pilot, four calibration batches,
-            # and exactly two measured cycles.
-            self.assertEqual(len(runner.calls), 8)
+            # Calls: warm-up, sizing pilot, four calibration batches, three
+            # excluded validation bursts, and exactly two measured cycles.
+            self.assertEqual(len(runner.calls), 11)
             self.assertEqual(runner.calls[-2:], [120, 120])
             self.assertEqual(runner.burst_preparations, len(runner.calls))
-            self.assertEqual(len(set(map(id, runner.parameter_states))), 8)
-            self.assertEqual(len(set(map(id, runner.input_states))), 8)
+            self.assertEqual(len(set(map(id, runner.parameter_states))), 11)
+            self.assertEqual(len(set(map(id, runner.input_states))), 11)
 
             manifest_path = Path(manifest["manifest_path"])
             self.assertTrue(manifest_path.exists())
             persisted = json.loads(manifest_path.read_text(encoding="utf-8"))
             self.assertEqual(persisted["campaign_id"], manifest["campaign_id"])
+
+    def test_calibration_resizes_batch_after_pilot_regime_shift(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manifest = self._manager(
+                temp_dir,
+                runner_cls=PilotRegimeShiftRunner,
+            ).execute()
+
+            attempts = manifest["calibration"]["sizing_attempts"]
+            self.assertEqual([attempt["inferences"] for attempt in attempts], [10, 50])
+            self.assertTrue(manifest["calibration"]["sizing_converged"])
+            self.assertEqual(manifest["calibration"]["batch_inferences"], 50)
+            self.assertEqual(manifest["plan"]["inferences_per_cycle"], 600)
+
+    def test_validation_corrects_for_faster_final_count_regime(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manifest = self._manager(
+                temp_dir,
+                runner_cls=FinalCountRegimeShiftRunner,
+            ).execute()
+
+            validation = manifest["burst_validation"]
+            self.assertTrue(validation["adjusted"])
+            self.assertEqual(len(validation["rounds"]), 2)
+            self.assertEqual(
+                validation["rounds"][0]["inferences_per_burst"],
+                120,
+            )
+            self.assertGreaterEqual(
+                validation["final_minimum_burst_seconds"],
+                manifest["plan"]["required_burst_seconds"],
+            )
+            self.assertGreaterEqual(
+                manifest["plan"]["inferences_per_cycle"],
+                660,
+            )
+            self.assertTrue(
+                all(
+                    "UNDER_RESOLVED" not in cycle["quality_flags"]
+                    for cycle in manifest["measurement"]["cycles"]
+                )
+            )
 
     def test_manual_override_that_is_too_short_is_rejected(self):
         with tempfile.TemporaryDirectory() as temp_dir:

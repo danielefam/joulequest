@@ -45,6 +45,8 @@ class CalibrationResult:
     coefficient_of_variation: float
     stability_limit: float
     is_stable: bool
+    sizing_attempts: tuple
+    sizing_converged: bool
 
 
 def calculate_required_burst_seconds(
@@ -312,8 +314,14 @@ class RunManager:
         calibration_initial_inferences=10,
         calibration_target_seconds=0.5,
         calibration_repetitions=5,
+        calibration_sizing_max_attempts=3,
+        calibration_duration_tolerance=0.20,
         max_relative_mad=0.15,
         burst_duration_margin=1.2,
+        validation_repetitions=3,
+        validation_max_rounds=3,
+        validation_safety_margin=1.1,
+        validation_cooldown_seconds=None,
         clock_sync_exchanges=10,
         max_clock_uncertainty_fraction=0.50,
         max_calibration_inferences=1_000_000,
@@ -346,8 +354,18 @@ class RunManager:
         self.calibration_initial_inferences = calibration_initial_inferences
         self.calibration_target_seconds = calibration_target_seconds
         self.calibration_repetitions = calibration_repetitions
+        self.calibration_sizing_max_attempts = calibration_sizing_max_attempts
+        self.calibration_duration_tolerance = calibration_duration_tolerance
         self.max_relative_mad = max_relative_mad
         self.burst_duration_margin = burst_duration_margin
+        self.validation_repetitions = validation_repetitions
+        self.validation_max_rounds = validation_max_rounds
+        self.validation_safety_margin = validation_safety_margin
+        self.validation_cooldown_seconds = (
+            sleep_time
+            if validation_cooldown_seconds is None
+            else validation_cooldown_seconds
+        )
         self.clock_sync_exchanges = clock_sync_exchanges
         self.max_clock_uncertainty_fraction = (
             max_clock_uncertainty_fraction
@@ -369,10 +387,26 @@ class RunManager:
                 "calibration_repetitions must include one discarded and "
                 "at least one retained batch"
             )
+        if self.calibration_target_seconds <= 0:
+            raise ValueError("calibration_target_seconds must be positive")
+        if self.calibration_sizing_max_attempts < 1:
+            raise ValueError("calibration_sizing_max_attempts must be positive")
+        if not 0 <= self.calibration_duration_tolerance < 1:
+            raise ValueError(
+                "calibration_duration_tolerance must be in the range [0, 1)"
+            )
         if self.max_relative_mad < 0:
             raise ValueError("max_relative_mad cannot be negative")
         if self.burst_duration_margin < 1:
             raise ValueError("burst_duration_margin must be at least 1")
+        if self.validation_repetitions < 1:
+            raise ValueError("validation_repetitions must be positive")
+        if self.validation_max_rounds < 1:
+            raise ValueError("validation_max_rounds must be positive")
+        if self.validation_safety_margin < 1:
+            raise ValueError("validation_safety_margin must be at least 1")
+        if self.validation_cooldown_seconds < 0:
+            raise ValueError("validation_cooldown_seconds cannot be negative")
         if self.clock_sync_exchanges < 1:
             raise ValueError("clock_sync_exchanges must be positive")
         if self.max_clock_uncertainty_fraction <= 0:
@@ -442,7 +476,57 @@ class RunManager:
             max(self.calibration_initial_inferences, scaled_count),
         )
 
-        batches = [runner.run_burst(batch_inferences) for _ in range(self.calibration_repetitions)]
+        sizing_results = []
+        sizing_attempts = []
+        sizing_converged = False
+        for attempt in range(1, self.calibration_sizing_max_attempts + 1):
+            sizing_result = runner.run_burst(batch_inferences)
+            sizing_results.append(sizing_result)
+            target_ratio = (
+                sizing_result.elapsed_seconds / self.calibration_target_seconds
+            )
+            sizing_attempts.append(
+                {
+                    "attempt": attempt,
+                    "inferences": batch_inferences,
+                    "elapsed_seconds": sizing_result.elapsed_seconds,
+                    "target_ratio": target_ratio,
+                }
+            )
+            if (
+                abs(target_ratio - 1.0) <= self.calibration_duration_tolerance
+                or batch_inferences == self.max_calibration_inferences
+            ):
+                sizing_converged = (
+                    abs(target_ratio - 1.0)
+                    <= self.calibration_duration_tolerance
+                )
+                break
+
+            adjusted_count = min(
+                self.max_calibration_inferences,
+                max(
+                    self.calibration_initial_inferences,
+                    math.ceil(
+                        batch_inferences
+                        * self.calibration_target_seconds
+                        / sizing_result.elapsed_seconds
+                    ),
+                ),
+            )
+            if adjusted_count == batch_inferences:
+                break
+            if attempt == self.calibration_sizing_max_attempts:
+                break
+            batch_inferences = adjusted_count
+
+        batches = [
+            sizing_results[-1],
+            *[
+                runner.run_burst(batch_inferences)
+                for _ in range(self.calibration_repetitions - 1)
+            ],
+        ]
 
         retained = batches[1:]  # discard the first one
         #latency_seconds is derived over one single inference
@@ -470,12 +554,19 @@ class RunManager:
             sizing_pilot_inferences=pilot.executed_inferences,
             total_executed_inferences=(
                 pilot.executed_inferences
-                + sum(result.executed_inferences for result in batches)
+                + sum(
+                    result.executed_inferences for result in sizing_results
+                )
+                + sum(
+                    result.executed_inferences for result in batches[1:]
+                )
             ),
             relative_mad=relative_mad,
             coefficient_of_variation=coefficient_of_variation,
             stability_limit=self.max_relative_mad,
             is_stable=is_stable,
+            sizing_attempts=tuple(sizing_attempts),
+            sizing_converged=sizing_converged,
         )
 
     def _select_inference_count(self, calibration):
@@ -520,18 +611,97 @@ class RunManager:
         )
         os.replace(temporary_path, path)
 
-    def _build_measurement_plan(self, calibration):
+    def _validate_inference_count(
+        self,
+        runner,
+        inference_count,
+        selection_mode,
+        required_burst_seconds,
+    ):
+        rounds = []
+        total_executed_inferences = 0
+
+        for round_number in range(1, self.validation_max_rounds + 1):
+            results = []
+            for _ in range(self.validation_repetitions):
+                self.sleep_fn(self.validation_cooldown_seconds)
+                results.append(runner.run_burst(inference_count))
+
+            durations = [result.elapsed_seconds for result in results]
+            total_executed_inferences += sum(
+                result.executed_inferences for result in results
+            )
+            minimum_duration = min(durations)
+            median_duration = statistics.median(durations)
+            passed = minimum_duration >= required_burst_seconds
+            rounds.append(
+                {
+                    "round": round_number,
+                    "inferences_per_burst": inference_count,
+                    "durations_seconds": durations,
+                    "minimum_duration_seconds": minimum_duration,
+                    "median_duration_seconds": median_duration,
+                    "passed": passed,
+                }
+            )
+            if passed:
+                return inference_count, {
+                    "included_in_measurement": False,
+                    "required_burst_seconds": required_burst_seconds,
+                    "repetitions_per_round": self.validation_repetitions,
+                    "cooldown_seconds": self.validation_cooldown_seconds,
+                    "safety_margin": self.validation_safety_margin,
+                    "rounds": rounds,
+                    "adjusted": len(rounds) > 1,
+                    "passed": True,
+                    "final_minimum_burst_seconds": minimum_duration,
+                    "final_median_burst_seconds": median_duration,
+                    "total_executed_inferences": total_executed_inferences,
+                }
+
+            if selection_mode == "manual_override":
+                raise ValueError(
+                    "The --inferences_per_cycle override produced a minimum "
+                    f"validated duration of {minimum_duration} seconds, below "
+                    f"the required duration ({required_burst_seconds} seconds)"
+                )
+
+            adjusted_count = max(
+                inference_count + 1,
+                math.ceil(
+                    inference_count
+                    * required_burst_seconds
+                    / minimum_duration
+                    * self.validation_safety_margin
+                ),
+            )
+            if adjusted_count > self.max_calibration_inferences:
+                raise RuntimeError(
+                    "Validated inference count exceeds "
+                    f"max_calibration_inferences ({self.max_calibration_inferences})"
+                )
+            inference_count = adjusted_count
+
+        raise RuntimeError(
+            "Unable to validate a burst duration that satisfies the active "
+            f"sample requirement after {self.validation_max_rounds} rounds"
+        )
+
+    def _build_measurement_plan(
+        self,
+        calibration,
+        inference_count,
+        selection_mode,
+        validation,
+    ):
         """Build the immutable plan used by the INA226 operator."""
-        inference_count, selection_mode = self._select_inference_count(calibration)
         required_burst_seconds = calculate_required_burst_seconds(
             self.target_burst_seconds,
             self.min_active_samples,
             self.sampling_rate_hz,
             self.burst_duration_margin,
         )
-        estimated_burst_seconds = (
-            inference_count * calibration.stable_latency_seconds
-        )
+        estimated_burst_seconds = validation["final_median_burst_seconds"]
         capture_plan = calculate_capture_plan(
             self.number_of_cycles,
             estimated_burst_seconds,
@@ -582,9 +752,14 @@ class RunManager:
         manifest["calibration"] = {
             **asdict(calibration),
             "included_in_measurement": False,
-            "quality_flags": (
-                [] if calibration.is_stable else ["CALIBRATION_UNSTABLE"]
-            ),
+            "quality_flags": [
+                *([] if calibration.is_stable else ["CALIBRATION_UNSTABLE"]),
+                *(
+                    []
+                    if calibration.sizing_converged
+                    else ["CALIBRATION_SIZING_NOT_CONVERGED"]
+                ),
+            ],
         }
         self._emit_event(
             "CALIBRATION_END",
@@ -593,7 +768,28 @@ class RunManager:
             **manifest["calibration"],
         )
 
-        plan = self._build_measurement_plan(calibration)
+        required_burst_seconds = calculate_required_burst_seconds(
+            self.target_burst_seconds,
+            self.min_active_samples,
+            self.sampling_rate_hz,
+            self.burst_duration_margin,
+        )
+        inference_count, selection_mode = self._select_inference_count(
+            calibration
+        )
+        inference_count, validation = self._validate_inference_count(
+            runner,
+            inference_count,
+            selection_mode,
+            required_burst_seconds,
+        )
+        manifest["burst_validation"] = validation
+        plan = self._build_measurement_plan(
+            calibration,
+            inference_count,
+            selection_mode,
+            validation,
+        )
         manifest["plan"] = plan
         manifest["status"] = "READY"
         return plan
@@ -1066,8 +1262,14 @@ def build_argument_parser():
     parser.add_argument("--calibration_initial_inferences", type=int, default=10)
     parser.add_argument("--calibration_target_seconds", type=float, default=0.5)
     parser.add_argument("--calibration_repetitions", type=int, default=5, help="at least 2 because the first one in discarded")
+    parser.add_argument("--calibration-sizing-max-attempts", type=int, default=3, help="maximum adaptive attempts used to reach the calibration batch target")
+    parser.add_argument("--calibration-duration-tolerance", type=float, default=0.20, help="accepted relative difference from the calibration batch target")
     parser.add_argument("--max_relative_mad", type=float, default=0.15, help="maximum accepted relative MAD and coefficient of variation")
     parser.add_argument("--burst-duration-margin", type=float, default=1.2, help="safety factor applied to automatically planned burst duration")
+    parser.add_argument("--validation-repetitions", type=int, default=3, help="excluded final-count validation bursts per round")
+    parser.add_argument("--validation-max-rounds", type=int, default=3, help="maximum validation and correction rounds")
+    parser.add_argument("--validation-safety-margin", type=float, default=1.1, help="extra count margin applied after failed validation")
+    parser.add_argument("--validation-cooldown-seconds", type=float, default=None, help="pause before each validation burst; uses --sleep_time if omitted")
     parser.add_argument("--clock-sync-exchanges", type=int, default=10, help="clock exchanges in each pre/post acquisition synchronization round")
     parser.add_argument("--max-clock-uncertainty-fraction", type=float, default=0.50, help="maximum alignment uncertainty as a fraction of one sample period")
     parser.add_argument("--max_calibration_inferences", type=int, default=1000000)
@@ -1110,8 +1312,14 @@ def main():
         calibration_initial_inferences=args.calibration_initial_inferences,
         calibration_target_seconds=args.calibration_target_seconds,
         calibration_repetitions=args.calibration_repetitions,
+        calibration_sizing_max_attempts=args.calibration_sizing_max_attempts,
+        calibration_duration_tolerance=args.calibration_duration_tolerance,
         max_relative_mad=args.max_relative_mad,
         burst_duration_margin=args.burst_duration_margin,
+        validation_repetitions=args.validation_repetitions,
+        validation_max_rounds=args.validation_max_rounds,
+        validation_safety_margin=args.validation_safety_margin,
+        validation_cooldown_seconds=args.validation_cooldown_seconds,
         clock_sync_exchanges=args.clock_sync_exchanges,
         max_clock_uncertainty_fraction=args.max_clock_uncertainty_fraction,
         max_calibration_inferences=args.max_calibration_inferences,

@@ -469,10 +469,20 @@ class SshExperimentController:
             str(args.calibration_target_seconds),
             "--calibration_repetitions",
             str(args.calibration_repetitions),
+            "--calibration-sizing-max-attempts",
+            str(args.calibration_sizing_max_attempts),
+            "--calibration-duration-tolerance",
+            str(args.calibration_duration_tolerance),
             "--max_relative_mad",
             str(args.max_relative_mad),
             "--burst-duration-margin",
             str(args.burst_duration_margin),
+            "--validation-repetitions",
+            str(args.validation_repetitions),
+            "--validation-max-rounds",
+            str(args.validation_max_rounds),
+            "--validation-safety-margin",
+            str(args.validation_safety_margin),
             "--clock-sync-exchanges",
             str(args.clock_sync_exchanges),
             "--max-clock-uncertainty-fraction",
@@ -498,6 +508,13 @@ class SshExperimentController:
                 [
                     "--warmup_cooldown_seconds",
                     str(args.warmup_cooldown_seconds),
+                ]
+            )
+        if args.validation_cooldown_seconds is not None:
+            arguments.extend(
+                [
+                    "--validation-cooldown-seconds",
+                    str(args.validation_cooldown_seconds),
                 ]
             )
         return arguments
@@ -976,8 +993,14 @@ def build_argument_parser():
     parser.add_argument("--calibration_initial_inferences", type=int, default=10)
     parser.add_argument("--calibration_target_seconds", type=float, default=0.5)
     parser.add_argument("--calibration_repetitions", type=int, default=5)
+    parser.add_argument("--calibration-sizing-max-attempts", type=int, default=3)
+    parser.add_argument("--calibration-duration-tolerance", type=float, default=0.20)
     parser.add_argument("--max_relative_mad", type=float, default=0.15)
     parser.add_argument("--burst-duration-margin", type=float, default=1.2)
+    parser.add_argument("--validation-repetitions", type=int, default=3)
+    parser.add_argument("--validation-max-rounds", type=int, default=3)
+    parser.add_argument("--validation-safety-margin", type=float, default=1.1)
+    parser.add_argument("--validation-cooldown-seconds", type=float, default=None)
     parser.add_argument("--clock-sync-exchanges", type=int, default=10)
     parser.add_argument(
         "--max-clock-uncertainty-fraction",
@@ -1085,8 +1108,14 @@ def build_local_manager(args, acquisition_controller):
         calibration_initial_inferences=args.calibration_initial_inferences,
         calibration_target_seconds=args.calibration_target_seconds,
         calibration_repetitions=args.calibration_repetitions,
+        calibration_sizing_max_attempts=args.calibration_sizing_max_attempts,
+        calibration_duration_tolerance=args.calibration_duration_tolerance,
         max_relative_mad=args.max_relative_mad,
         burst_duration_margin=args.burst_duration_margin,
+        validation_repetitions=args.validation_repetitions,
+        validation_max_rounds=args.validation_max_rounds,
+        validation_safety_margin=args.validation_safety_margin,
+        validation_cooldown_seconds=args.validation_cooldown_seconds,
         clock_sync_exchanges=args.clock_sync_exchanges,
         max_clock_uncertainty_fraction=args.max_clock_uncertainty_fraction,
         max_calibration_inferences=args.max_calibration_inferences,

@@ -1,6 +1,6 @@
 # `run_manager.py` Update
 
-**Document date:** 2026-07-24  
+**Document date:** 2026-07-31
 **Scope:** Changes made to `run_manager.py` only
 
 ## 1. Purpose of the update
@@ -34,8 +34,8 @@ The update preserves the existing three workload phases:
 The following rules remain unchanged:
 
 - warm-up and calibration have `included_in_measurement: false`;
-- the measured inference count is selected from calibration unless an explicit
-  valid override is supplied;
+- the measured inference count is initially selected from calibration, then
+  validated before acquisition unless an explicit valid override is supplied;
 - `runner.prepare_burst()` remains outside the timed active interval;
 - only `runner.run_prepared_burst()` contributes to measured-cycle duration;
 - leading and trailing idle intervals remain available for baseline analysis;
@@ -75,18 +75,20 @@ With an acquisition controller, `RunManager.execute()` performs this sequence:
 2. Construct and prepare the inference runner.
 3. Run warm-up and its cooldown.
 4. Run calibration and validate timing stability.
-5. Build the adaptive measurement plan.
-6. Add the acquisition description with status `PENDING`.
-7. Atomically write the `READY` manifest.
-8. Emit the `READY` event.
-9. Start acquisition and wait for the controller result.
-10. Record leading idle.
-11. Execute all measured cycles and inter-cycle idle intervals.
-12. Record trailing idle.
-13. Record `safety_margin_seconds` of additional idle.
-14. Stop acquisition and wait for cleanup.
-15. Atomically write the final manifest.
-16. Emit `COMPLETE`.
+5. Validate the planned inference count with excluded bursts and correct it if
+  automatic sizing is too short.
+6. Build the adaptive measurement plan from the validated count.
+7. Add the acquisition description with status `PENDING`.
+8. Atomically write the `READY` manifest.
+9. Emit the `READY` event.
+10. Start acquisition and wait for the controller result.
+11. Record leading idle.
+12. Execute all measured cycles and inter-cycle idle intervals.
+13. Record trailing idle.
+14. Record `safety_margin_seconds` of additional idle.
+15. Stop acquisition and wait for cleanup.
+16. Atomically write the final manifest.
+17. Emit `COMPLETE`.
 
 This ordering guarantees that model setup, warm-up, and calibration happen
 before acquisition. It also guarantees that the final manifest write happens
@@ -172,7 +174,7 @@ campaign ID raises an error handled by the normal failure path.
 
 ## 6. CLI additions
 
-Two relevant command-line options are available:
+The acquisition-boundary options are:
 
 | Option | Meaning |
 | --- | --- |
@@ -180,6 +182,17 @@ Two relevant command-line options are available:
 | `--stdio_acquisition` | Coordinate acquisition through JSON stdin/stdout |
 
 They belong to one mutually exclusive argument group.
+
+Adaptive sizing also accepts the following controls:
+
+| Option | Default | Meaning |
+| --- | ---: | --- |
+| `--calibration-sizing-max-attempts` | `3` | Maximum attempts to make a calibration batch reach its target duration |
+| `--calibration-duration-tolerance` | `0.20` | Accepted relative error from the calibration batch target duration |
+| `--validation-repetitions` | `3` | Excluded final-count validation bursts per validation round |
+| `--validation-max-rounds` | `3` | Maximum validation and automatic correction rounds |
+| `--validation-safety-margin` | `1.1` | Extra count factor after a failed automatic validation round |
+| `--validation-cooldown-seconds` | `sleep_time` | Pause before each validation burst when explicitly set, otherwise inherited from `--sleep_time` |
 
 The remote-controlled mode is selected with:
 
@@ -195,11 +208,14 @@ python run_manager.py \
 not entered interactively in a terminal, because it blocks while waiting for
 the JSON start and stop replies.
 
-## 7. Calibration stability validation
+## 7. Calibration stability and duration validation
 
-Calibration still uses a sizing pilot, scales toward
-`calibration_target_seconds`, executes repeated full batches, discards the first
-full batch, and uses the retained batches to estimate steady-state latency.
+Calibration starts with a sizing pilot and scales toward
+`calibration_target_seconds`. It then measures and rescales the calibration
+batch up to `calibration_sizing_max_attempts` times. Sizing converges when the
+observed duration is within `calibration_duration_tolerance` of the target. The
+final sizing attempt is reused as the first discarded full calibration batch;
+the retained batches estimate steady-state latency.
 
 The update adds `max_relative_mad`, with default value `0.15`. For retained
 per-inference latencies it computes:
@@ -227,6 +243,36 @@ The accepted metrics are stored in the manifest under `calibration`:
 This validation prevents an unstable latency estimate from silently selecting
 an unreliable measured inference count.
 
+Failure to reach the calibration duration target does not discard a capture by
+itself. It records `CALIBRATION_SIZING_NOT_CONVERGED`, alongside any
+`CALIBRATION_UNSTABLE` flag, so that the completed campaign receives
+`quality_status: REVIEW`.
+
+### Final-count validation
+
+The latency median produces only an initial `inferences_per_cycle`. Before
+`READY` and before acquisition starts, `RunManager` executes
+`validation_repetitions` excluded bursts with that exact count. Each validation
+burst receives a fresh workload state and is separated by the validation
+cooldown. The shortest observed duration must meet $T_{required}$.
+
+For an automatically selected count that fails validation, the next count is:
+
+$$
+N_{next}=\left\lceil
+N_{current}\frac{T_{required}}{T_{validation,min}}m_v
+\right\rceil
+$$
+
+where $m_v$ is `validation_safety_margin`. The corrected count is measured
+again, up to `validation_max_rounds`. This protects the capture from a faster
+GPU operating regime caused, for example, by power, DVFS, or thermal changes.
+
+An explicit `--inferences_per_cycle` override is never silently modified. It
+raises `ValueError` before acquisition if its shortest validation burst is too
+short. An automatic count that cannot pass validation also fails before
+acquisition instead of creating known under-resolved regions.
+
 ## 8. Adaptive inference and capture planning
 
 The automatic count continues to use:
@@ -236,9 +282,12 @@ T_{required}=1.2\max\left(T_{target},\frac{N_{samples,min}}{f_s}\right)
 $$
 
 $$
-N_{inferences}=\max\left(1,\left\lceil
+N_{initial}=\max\left(1,\left\lceil
 \frac{T_{required}}{t_{inference}}\right\rceil\right)
 $$
+
+The final value of $N_{inferences}$ is the count that passes the pre-acquisition
+validation described above. It remains fixed for every measured cycle.
 
 The capture plan remains:
 
@@ -252,8 +301,9 @@ N_{capture}=\left\lceil T_{capture}f_s\right\rceil
 $$
 
 An explicit `--inferences_per_cycle` override remains supported, but it is
-rejected if its estimated duration would produce fewer than
-`min_active_samples`.
+rejected both when its calibration estimate would produce fewer than
+`min_active_samples` and when validation measures an insufficient minimum burst
+duration.
 
 ## 9. Manifest updates
 
@@ -320,6 +370,29 @@ Calibration can additionally contribute `CALIBRATION_UNSTABLE`. Poor clock
 alignment is recorded as a classifier fallback reason, not as a campaign
 quality failure.
 
+`CALIBRATION_SIZING_NOT_CONVERGED` is also a calibration quality flag. It means
+the sizing attempts did not reach the requested calibration duration; the
+separate final-count validation still has to pass before acquisition can begin.
+
+### Calibration and validation metadata
+
+The calibration section now records the excluded sizing attempts:
+
+```json
+{
+  "sizing_attempts": [
+    {"attempt": 1, "inferences": 640, "elapsed_seconds": 0.52},
+    {"attempt": 2, "inferences": 1231, "elapsed_seconds": 1.01}
+  ],
+  "sizing_converged": true
+}
+```
+
+The top-level `burst_validation` object records every excluded final-count
+round, its durations, whether it passed, the final minimum and median duration,
+and the total excluded inference count. These bursts are not included in
+`measurement.total_executed_inferences` or power/energy normalization.
+
 If acquisition fails while the workload completes, the campaign remains
 `COMPLETE`, gains `ACQUISITION_FAILED`, and receives
 `quality_status: REVIEW`. A workload exception instead produces campaign status
@@ -375,6 +448,7 @@ The following modes remain supported:
 - runner-only execution without acquisition control;
 - manual acquisition with `--wait_for_acquisition`;
 - explicit `--inferences_per_cycle` campaigns;
+- iterative calibration sizing and excluded final-count validation;
 - CPU, CUDA, and TPU runner selection;
 - the existing event names and manifest schema version;
 - use of `RunManager` as a Python class with injected `sleep_fn` and `input_fn`
@@ -394,6 +468,8 @@ measurement hardware:
 - workload policy metadata;
 - rejection of a too-short manual inference override;
 - rejection of unstable calibration;
+- iterative calibration correction after a pilot regime change;
+- final-count correction when validation observes a faster execution regime;
 - complete lifecycle event ordering;
 - acquisition start/stop ordering around the capture window;
 - safety margin before acquisition stop;
