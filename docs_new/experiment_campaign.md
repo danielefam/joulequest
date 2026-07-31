@@ -160,7 +160,7 @@ campaign parameters:
 | `VALIDATION_MAX_ROUNDS` | `3` | Maximum pre-acquisition correction rounds |
 | `VALIDATION_SAFETY_MARGIN` | `1.1` | Extra count factor after a failed validation round |
 | `VALIDATION_COOLDOWN_SECONDS` | empty | Use `SLEEP_TIME`, or set the pause before each validation burst |
-| `CLOCK_SYNC_EXCHANGES` | `10` | Exchanges in each pre/post clock round |
+| `CLOCK_SYNC_EXCHANGES` | `10` | Maximum exchanges per pre/post round; precise links stop after at least 3 |
 | `MAX_CLOCK_UNCERTAINTY_FRACTION` | `0.50` | Above this sample-period fraction processing uses Otsu |
 | `MAX_CALIBRATION_INFERENCES` | `1000000` | Calibration batch safety cap |
 | `LEADING_IDLE_SECONDS` | `5` s | Baseline before the first measured cycle |

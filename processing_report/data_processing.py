@@ -344,11 +344,7 @@ def _idle_baseline(samples, manifest):
     except (TypeError, ValueError):
         safety_margin_seconds = None
 
-    candidates = pd.Series(dtype=float)
-    source = "final measured safety margin"
-    if safety_margin_seconds is None or safety_margin_seconds <= 0:
-        fallback_reason = "SAFETY_MARGIN_UNAVAILABLE"
-    else:
+    if safety_margin_seconds is not None and safety_margin_seconds > 0:
         window_start = float(times.iloc[-1] - safety_margin_seconds)
         candidates = samples.loc[
             (times >= window_start) & (samples["phase"] == "idle"),
@@ -356,12 +352,16 @@ def _idle_baseline(samples, manifest):
         ]
         if len(candidates) < 2:
             fallback_reason = "SAFETY_MARGIN_IDLE_SAMPLES_INSUFFICIENT"
+    else:
+        fallback_reason = "SAFETY_MARGIN_UNAVAILABLE"
 
     if fallback_reason is not None:
         source = "classified idle fallback"
         candidates = samples.loc[
             samples["phase"] == "idle", "power_clean_W"
         ]
+    else:
+        source = "final measured safety margin"
 
     if candidates.empty:
         return np.nan, {
