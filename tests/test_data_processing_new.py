@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from processing_report.data_processing_new import (
+from processing_report.data_processing import (
     POWER_COLUMN,
     ProcessingConfig,
     process_measurement,
