@@ -142,15 +142,20 @@ def calculate_clock_sync_sample(
 class StdioAcquisitionController:
     """Coordinate acquisition owned by the process controlling stdin/stdout."""
 
+    _MIN_ADAPTIVE_CLOCK_SYNC_EXCHANGES = 3
+    _CLOCK_SYNC_EARLY_STOP_MARGIN = 0.5
+
     def __init__(
         self,
         input_stream=None,
         output_stream=None,
         monotonic_fn=time.monotonic,
+        max_clock_uncertainty_fraction=None,
     ):
         self.input_stream = input_stream or sys.stdin
         self.output_stream = output_stream or sys.stdout
         self.monotonic_fn = monotonic_fn
+        self.max_clock_uncertainty_fraction = max_clock_uncertainty_fraction
         self.campaign_id = None
         self.plan = None
         self.stop_result = None
@@ -212,10 +217,45 @@ class StdioAcquisitionController:
             "acquisition_role": "controller_host",
         }
 
+    def _clock_sync_early_stop_threshold(self):
+        if self.plan is None or self.max_clock_uncertainty_fraction is None:
+            return None
+        try:
+            sample_period_seconds = 1.0 / float(self.plan["sampling_rate_hz"])
+            threshold_seconds = (
+                float(self.max_clock_uncertainty_fraction)
+                * sample_period_seconds
+                * self._CLOCK_SYNC_EARLY_STOP_MARGIN
+            )
+        except (KeyError, TypeError, ValueError, ZeroDivisionError):
+            return None
+        if not math.isfinite(threshold_seconds) or threshold_seconds <= 0:
+            return None
+        return threshold_seconds
+
+    @classmethod
+    def _clock_sync_can_stop_early(cls, samples, threshold_seconds):
+        if (
+            threshold_seconds is None
+            or len(samples) < cls._MIN_ADAPTIVE_CLOCK_SYNC_EXCHANGES
+        ):
+            return False
+        uncertainties = [sample["uncertainty_seconds"] for sample in samples]
+        offsets = [
+            sample["controller_minus_runner_seconds"] for sample in samples
+        ]
+        return (
+            max(uncertainties) <= threshold_seconds
+            and max(offsets) - min(offsets) <= threshold_seconds
+        )
+
     def synchronize_clock(self, round_name, exchange_count):
         samples = []
         errors = []
+        attempted_exchange_count = 0
+        early_stop_threshold = self._clock_sync_early_stop_threshold()
         for exchange_index in range(exchange_count):
+            attempted_exchange_count = exchange_index + 1
             request_id = f"{round_name}:{exchange_index + 1}"
             request = self._emit(
                 "CLOCK_SYNC_REQUEST",
@@ -245,14 +285,26 @@ class StdioAcquisitionController:
                 continue
             sample["request_id"] = request_id
             samples.append(sample)
+            if not errors and self._clock_sync_can_stop_early(
+                samples,
+                early_stop_threshold,
+            ):
+                break
+
+        progress = {
+            "requested_exchange_count": exchange_count,
+            "attempted_exchange_count": attempted_exchange_count,
+            "valid_exchange_count": len(samples),
+            "stopped_early": attempted_exchange_count < exchange_count,
+            "early_stop_threshold_seconds": early_stop_threshold,
+        }
 
         if not samples:
             return {
                 "status": "UNAVAILABLE",
                 "round": round_name,
                 "method": "minimum_round_trip",
-                "requested_exchange_count": exchange_count,
-                "valid_exchange_count": 0,
+                **progress,
                 "errors": errors,
             }
         selected = min(samples, key=lambda sample: sample["round_trip_seconds"])
@@ -260,8 +312,7 @@ class StdioAcquisitionController:
             "status": "COMPLETE",
             "round": round_name,
             "method": "minimum_round_trip",
-            "requested_exchange_count": exchange_count,
-            "valid_exchange_count": len(samples),
+            **progress,
             "selected_sample": selected,
             "errors": errors,
         }
@@ -976,7 +1027,7 @@ class RunManager:
             }
 
     @staticmethod
-    def _selected_sync_sample(round_result):
+    def _validated_sync_values(round_result):
         if not isinstance(round_result, dict):
             raise ValueError("Clock synchronization round is missing")
         if round_result.get("status") != "COMPLETE":
@@ -1000,7 +1051,50 @@ class RunManager:
             values[field] = value
         if values["round_trip_seconds"] < 0 or values["uncertainty_seconds"] < 0:
             raise ValueError("Clock synchronization uncertainty cannot be negative")
-        return sample, values
+        return values
+
+    @staticmethod
+    def _translate_measurement_cycles(
+        cycles,
+        capture_elapsed,
+        pre_midpoint,
+        post_midpoint,
+        pre_offset,
+        post_offset,
+        logger_start,
+    ):
+        translated_cycles = 0
+        bounds_valid = capture_elapsed is not None and capture_elapsed > 0
+        for cycle in cycles:
+            translated = []
+            for event_name in ("start_event", "end_event"):
+                event = cycle.get(event_name, {})
+                try:
+                    runner_seconds = float(event["monotonic_seconds"])
+                except (KeyError, TypeError, ValueError):
+                    bounds_valid = False
+                    break
+                position = (
+                    (runner_seconds - pre_midpoint)
+                    / (post_midpoint - pre_midpoint)
+                )
+                offset = pre_offset + position * (post_offset - pre_offset)
+                controller_seconds = runner_seconds + offset
+                elapsed_seconds = controller_seconds - logger_start
+                if not math.isfinite(elapsed_seconds):
+                    bounds_valid = False
+                    break
+                event["aligned_controller_monotonic_seconds"] = controller_seconds
+                event["aligned_elapsed_seconds"] = elapsed_seconds
+                translated.append(elapsed_seconds)
+            if len(translated) != 2:
+                continue
+            start_elapsed, end_elapsed = translated
+            if not 0 <= start_elapsed < end_elapsed <= capture_elapsed:
+                bounds_valid = False
+                continue
+            translated_cycles += 1
+        return translated_cycles, bounds_valid
 
     def _finalize_clock_alignment(self, manifest, pre_sync, post_sync):
         threshold_seconds = (
@@ -1022,8 +1116,8 @@ class RunManager:
         manifest.setdefault("acquisition", {})["clock_alignment"] = alignment
 
         try:
-            pre_sample, pre_values = self._selected_sync_sample(pre_sync)
-            post_sample, post_values = self._selected_sync_sample(post_sync)
+            pre_values = self._validated_sync_values(pre_sync)
+            post_values = self._validated_sync_values(post_sync)
         except (KeyError, TypeError, ValueError) as error:
             alignment["fallback_reason"] = "CLOCK_SYNC_METADATA_INVALID"
             alignment["validation_error"] = str(error)
@@ -1071,43 +1165,17 @@ class RunManager:
             capture_elapsed = float(capture_elapsed)
         except (TypeError, ValueError):
             capture_elapsed = None
-        translated_cycles = 0
-        bounds_valid = capture_elapsed is not None and capture_elapsed > 0
-        for cycle in manifest.get("measurement", {}).get("cycles", []):
-            translated = []
-            for event_name in ("start_event", "end_event"):
-                event = cycle.get(event_name, {})
-                try:
-                    runner_seconds = float(event["monotonic_seconds"])
-                except (KeyError, TypeError, ValueError):
-                    bounds_valid = False
-                    break
-                position = (
-                    (runner_seconds - pre_midpoint)
-                    / (post_midpoint - pre_midpoint)
-                )
-                offset = pre_offset + position * (post_offset - pre_offset)
-                controller_seconds = runner_seconds + offset
-                elapsed_seconds = controller_seconds - logger_start
-                if not math.isfinite(elapsed_seconds):
-                    bounds_valid = False
-                    break
-                event["aligned_controller_monotonic_seconds"] = controller_seconds
-                event["aligned_elapsed_seconds"] = elapsed_seconds
-                translated.append(elapsed_seconds)
-            if len(translated) != 2:
-                continue
-            start_elapsed, end_elapsed = translated
-            if not (
-                0 <= start_elapsed < end_elapsed <= capture_elapsed
-            ):
-                bounds_valid = False
-                continue
-            translated_cycles += 1
-
-        expected_cycles = len(
-            manifest.get("measurement", {}).get("cycles", [])
+        cycles = manifest.get("measurement", {}).get("cycles", [])
+        translated_cycles, bounds_valid = self._translate_measurement_cycles(
+            cycles=cycles,
+            capture_elapsed=capture_elapsed,
+            pre_midpoint=pre_midpoint,
+            post_midpoint=post_midpoint,
+            pre_offset=pre_offset,
+            post_offset=post_offset,
+            logger_start=logger_start,
         )
+        expected_cycles = len(cycles)
         alignment["translated_cycle_count"] = translated_cycles
         if not bounds_valid or translated_cycles != expected_cycles:
             alignment["fallback_reason"] = "ALIGNED_BURST_BOUNDS_INVALID"
@@ -1270,7 +1338,7 @@ def build_argument_parser():
     parser.add_argument("--validation-max-rounds", type=int, default=3, help="maximum validation and correction rounds")
     parser.add_argument("--validation-safety-margin", type=float, default=1.1, help="extra count margin applied after failed validation")
     parser.add_argument("--validation-cooldown-seconds", type=float, default=None, help="pause before each validation burst; uses --sleep_time if omitted")
-    parser.add_argument("--clock-sync-exchanges", type=int, default=10, help="clock exchanges in each pre/post acquisition synchronization round")
+    parser.add_argument("--clock-sync-exchanges", type=int, default=10, help="maximum clock exchanges per pre/post round; precise links stop after at least three")
     parser.add_argument("--max-clock-uncertainty-fraction", type=float, default=0.50, help="maximum alignment uncertainty as a fraction of one sample period")
     parser.add_argument("--max_calibration_inferences", type=int, default=1000000)
     parser.add_argument("--leading_idle_seconds", type=float, default=5.0)
@@ -1293,9 +1361,13 @@ def main():
         from runner import TorchRunner
         runner_cls = TorchRunner
 
-    acquisition_controller = (
-        StdioAcquisitionController() if args.stdio_acquisition else None
-    )
+    acquisition_controller = None
+    if args.stdio_acquisition:
+        acquisition_controller = StdioAcquisitionController(
+            max_clock_uncertainty_fraction=(
+                args.max_clock_uncertainty_fraction
+            )
+        )
     manager = RunManager(
         runner_cls=runner_cls,
         model_path=args.model,

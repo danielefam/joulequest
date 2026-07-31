@@ -528,11 +528,7 @@ class SshExperimentController:
             f"cd {shlex.quote(self.remote_directory)} && exec "
             + " ".join(shlex.quote(token) for token in remote_tokens)
         )
-        command = ["ssh", "-T", "-o", "BatchMode=yes"]
-        for option in self.ssh_options:
-            command.extend(["-o", option])
-        command.extend([self.runner_host, remote_command])
-        return command
+        return [*self._ssh_prefix(), remote_command]
 
     def _ssh_prefix(self):
         command = ["ssh", "-T", "-o", "BatchMode=yes"]
@@ -1001,7 +997,15 @@ def build_argument_parser():
     parser.add_argument("--validation-max-rounds", type=int, default=3)
     parser.add_argument("--validation-safety-margin", type=float, default=1.1)
     parser.add_argument("--validation-cooldown-seconds", type=float, default=None)
-    parser.add_argument("--clock-sync-exchanges", type=int, default=10)
+    parser.add_argument(
+        "--clock-sync-exchanges",
+        type=int,
+        default=10,
+        help=(
+            "maximum clock exchanges per pre/post round; precise links stop "
+            "after at least three"
+        ),
+    )
     parser.add_argument(
         "--max-clock-uncertainty-fraction",
         type=float,

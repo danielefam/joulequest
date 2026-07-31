@@ -322,7 +322,7 @@ Automated command exit codes are:
 | `calibration_repetitions`        |          batches |                         5 | No                           | Full timing batches, including one discard                |
 | `max_relative_mad`               |            ratio |                      0.15 | No                           | MAD/CV review threshold; never discards a capture         |
 | `burst_duration_margin`          |            ratio |                       1.2 | Planning only                | Headroom above target/minimum sample duration             |
-| `clock_sync_exchanges`           |        exchanges |                        10 | No                           | Samples in each pre/post clock round                      |
+| `clock_sync_exchanges`           |        exchanges |                        10 | No                           | Maximum samples per pre/post round; precise links stop after at least 3 |
 | `max_clock_uncertainty_fraction` | sample-period ratio |                    0.50 | Classification only          | Above this value processing uses Otsu                     |
 | `max_calibration_inferences`     |       inferences |                 1,000,000 | No                           | Safety cap for a calibration batch                        |
 | `leading_idle_seconds`           |                s |                         5 | Baseline only                | Idle baseline before first useful burst                   |
@@ -334,6 +334,12 @@ Automated command exit codes are:
 Every burst receives fresh parameters and input; this is part of the runner
 protocol rather than a command-line option. The preparation is excluded from
 the burst timer, while the complete sequence of forward passes is included.
+
+Remote clock synchronization stops early only after at least three successful
+exchanges when every observed uncertainty is at most half the normal
+classification limit and all offset estimates agree within that same margin.
+Failed, noisy, inconsistent, or marginal rounds retain the full
+`clock_sync_exchanges` budget.
 
 ## 10. Current limitations
 
