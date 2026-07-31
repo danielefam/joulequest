@@ -14,3 +14,4 @@ docs_new/*
 !docs_new/run_manager_update.md
 !docs_new/experiment_campaign.md
 measurement_hosts.local.json
+Tuto/retrain_classification_ptq_tf2.ipynb
