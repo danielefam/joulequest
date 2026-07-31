@@ -1,6 +1,6 @@
 # Adaptive Clean-Burst Measurement Protocol
 
-**Implementation status:** automated direct-serial acquisition, 2026-07-23
+**Implementation status:** automated direct-serial acquisition with validated burst sizing, 2026-07-31
 **Validated priority:** PyTorch CPU/CUDA
 **Compatibility only:** Edge TPU remains available but is not part of the current validation campaign.
 
@@ -79,21 +79,49 @@ Calibration happens after warm-up and before INA226 acquisition.
 
 1. Run a small sizing pilot (`calibration_initial_inferences`).
 2. Scale the batch count toward `calibration_target_seconds`.
-3. Run `calibration_repetitions` batches, changing parameters and input before
+3. Measure and rescale the batch up to `calibration_sizing_max_attempts` times
+   until its duration is within `calibration_duration_tolerance` of the target.
+4. Run `calibration_repetitions` batches, changing parameters and input before
    each batch.
-4. Discard the first full calibration batch as an additional stabilization guard.
-5. Compute per-inference latency from the retained batches.
-6. Use the median latency as the stable estimate.
-7. Compare relative median absolute deviation and coefficient of variation with
+5. Reuse the final sizing attempt as the first discarded calibration batch.
+6. Compute per-inference latency from the retained batches.
+7. Use the median latency as the initial stable estimate.
+8. Compare relative median absolute deviation and coefficient of variation with
   `max_relative_mad`.
 
 An unstable calibration no longer aborts the campaign. Its median latency still
 sizes the burst, `CALIBRATION_UNSTABLE` is recorded, and the completed capture
 is retained with `quality_status: REVIEW`.
 
-The default calibration target is 0.5 s per batch, with five batches total. The first is discarded and four are retained. The batch count is capped by `max_calibration_inferences` to avoid an unbounded sizing decision.
+The default calibration target is 0.5 s per batch, with five batches total. The first is discarded and four are retained. The batch count is capped by `max_calibration_inferences` to avoid an unbounded sizing decision. Failure to converge within the sizing attempts records `CALIBRATION_SIZING_NOT_CONVERGED`.
 
-## 5. Sampling-rate policy
+## 5. Pre-acquisition burst validation
+
+The latency median produces an initial inference count, but it is not trusted
+as the final plan. Before `READY`, the runner executes three excluded bursts
+with that exact count. Each burst receives a fresh workload state and the same
+cooldown used between measured cycles. The shortest observed duration must
+satisfy $T_{required}$.
+
+When validation fails, automatic sizing applies:
+
+$$
+N_{next}=\left\lceil
+N_{current}\frac{T_{required}}{T_{validation,min}}m_v
+\right\rceil
+$$
+
+where $m_v$ is `validation_safety_margin`, default $1.1$. The corrected count is
+validated again, for at most `validation_max_rounds` rounds. A manual override
+is never silently changed: it fails before acquisition when its measured
+duration is insufficient. Failure to validate an automatic count also stops
+before acquisition rather than producing knowingly under-resolved regions.
+
+The manifest records all excluded attempts under `calibration.sizing_attempts`
+and `burst_validation.rounds`. The final count remains fixed for every measured
+cycle, so energy normalization and cycle comparability are unchanged.
+
+## 6. Sampling-rate policy
 
 The current verified campaign rate is 10 Hz. The runner accepts `sampling_rate_hz` so the rate can be changed after hardware testing, but it does not automatically select a different sensor rate for every layer.
 
@@ -106,7 +134,7 @@ Preferred policy:
 
 A fixed campaign rate keeps filter configuration and measurements comparable. Dynamic sampling rates should be introduced only if bench validation proves that no single fixed rate supports both the fastest and slowest workloads.
 
-## 6. Automated acquisition sequence
+## 7. Automated acquisition sequence
 
 Use `automated_measurement.py` on the PC physically connected to the TI-SCB.
 The inference host is selected with `--runner-host` and reached through
@@ -206,7 +234,7 @@ python run_manager.py \
 
 An explicit `--inferences_per_cycle` remains available for controlled experiments. The runner rejects an override when its estimated duration would contain fewer than `min_active_samples`.
 
-## 7. Capture planning
+## 8. Capture planning
 
 The `READY` event reports acquisition duration and sample count using:
 
@@ -227,7 +255,7 @@ acquisition safety margin. Automated acquisition records that safety margin as
 additional idle baseline before stopping. The manual workflow leaves margin
 handling to the operator.
 
-## 8. Structured output and manifest
+## 9. Structured output and manifest
 
 Console events are one-line JSON records:
 

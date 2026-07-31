@@ -32,8 +32,14 @@ WARMUP_COOLDOWN_SECONDS="${WARMUP_COOLDOWN_SECONDS:-}"
 CALIBRATION_INITIAL_INFERENCES="${CALIBRATION_INITIAL_INFERENCES:-20}"
 CALIBRATION_TARGET_SECONDS="${CALIBRATION_TARGET_SECONDS:-1}"
 CALIBRATION_REPETITIONS="${CALIBRATION_REPETITIONS:-8}"
+CALIBRATION_SIZING_MAX_ATTEMPTS="${CALIBRATION_SIZING_MAX_ATTEMPTS:-3}"
+CALIBRATION_DURATION_TOLERANCE="${CALIBRATION_DURATION_TOLERANCE:-0.20}"
 MAX_RELATIVE_MAD="${MAX_RELATIVE_MAD:-0.15}"
 BURST_DURATION_MARGIN="${BURST_DURATION_MARGIN:-1.2}"
+VALIDATION_REPETITIONS="${VALIDATION_REPETITIONS:-3}"
+VALIDATION_MAX_ROUNDS="${VALIDATION_MAX_ROUNDS:-3}"
+VALIDATION_SAFETY_MARGIN="${VALIDATION_SAFETY_MARGIN:-1.1}"
+VALIDATION_COOLDOWN_SECONDS="${VALIDATION_COOLDOWN_SECONDS:-}"
 CLOCK_SYNC_EXCHANGES="${CLOCK_SYNC_EXCHANGES:-10}"
 MAX_CLOCK_UNCERTAINTY_FRACTION="${MAX_CLOCK_UNCERTAINTY_FRACTION:-0.50}"
 MAX_CALIBRATION_INFERENCES="${MAX_CALIBRATION_INFERENCES:-1000000}"
@@ -192,6 +198,12 @@ done
 [[ "$CALIBRATION_REPETITIONS" =~ ^[0-9]+$ ]] &&
     ((CALIBRATION_REPETITIONS >= 2)) ||
     die "CALIBRATION_REPETITIONS must be an integer of at least 2"
+[[ "$CALIBRATION_SIZING_MAX_ATTEMPTS" =~ ^[1-9][0-9]*$ ]] ||
+    die "CALIBRATION_SIZING_MAX_ATTEMPTS must be a positive integer"
+[[ "$VALIDATION_REPETITIONS" =~ ^[1-9][0-9]*$ ]] ||
+    die "VALIDATION_REPETITIONS must be a positive integer"
+[[ "$VALIDATION_MAX_ROUNDS" =~ ^[1-9][0-9]*$ ]] ||
+    die "VALIDATION_MAX_ROUNDS must be a positive integer"
 [[ "$MAX_CALIBRATION_INFERENCES" =~ ^[1-9][0-9]*$ ]] ||
     die "MAX_CALIBRATION_INFERENCES must be a positive integer"
 is_nonnegative_number "$SLEEP_TIME" || die "SLEEP_TIME must be nonnegative"
@@ -205,11 +217,21 @@ if [[ -n "$WARMUP_COOLDOWN_SECONDS" ]]; then
 fi
 is_positive_number "$CALIBRATION_TARGET_SECONDS" ||
     die "CALIBRATION_TARGET_SECONDS must be positive"
+is_nonnegative_number "$CALIBRATION_DURATION_TOLERANCE" &&
+    awk -v value="$CALIBRATION_DURATION_TOLERANCE" 'BEGIN { exit !(value < 1) }' ||
+    die "CALIBRATION_DURATION_TOLERANCE must be in the range [0, 1)"
 is_nonnegative_number "$MAX_RELATIVE_MAD" ||
     die "MAX_RELATIVE_MAD must be nonnegative"
 is_positive_number "$BURST_DURATION_MARGIN" &&
     awk -v value="$BURST_DURATION_MARGIN" 'BEGIN { exit !(value >= 1) }' ||
     die "BURST_DURATION_MARGIN must be at least 1"
+is_positive_number "$VALIDATION_SAFETY_MARGIN" &&
+    awk -v value="$VALIDATION_SAFETY_MARGIN" 'BEGIN { exit !(value >= 1) }' ||
+    die "VALIDATION_SAFETY_MARGIN must be at least 1"
+if [[ -n "$VALIDATION_COOLDOWN_SECONDS" ]]; then
+    is_nonnegative_number "$VALIDATION_COOLDOWN_SECONDS" ||
+        die "VALIDATION_COOLDOWN_SECONDS must be nonnegative"
+fi
 [[ "$CLOCK_SYNC_EXCHANGES" =~ ^[1-9][0-9]*$ ]] ||
     die "CLOCK_SYNC_EXCHANGES must be a positive integer"
 is_positive_number "$MAX_CLOCK_UNCERTAINTY_FRACTION" ||
@@ -272,8 +294,13 @@ COMMON_ARGS=(
     --calibration_initial_inferences "$CALIBRATION_INITIAL_INFERENCES"
     --calibration_target_seconds "$CALIBRATION_TARGET_SECONDS"
     --calibration_repetitions "$CALIBRATION_REPETITIONS"
+    --calibration-sizing-max-attempts "$CALIBRATION_SIZING_MAX_ATTEMPTS"
+    --calibration-duration-tolerance "$CALIBRATION_DURATION_TOLERANCE"
     --max_relative_mad "$MAX_RELATIVE_MAD"
     --burst-duration-margin "$BURST_DURATION_MARGIN"
+    --validation-repetitions "$VALIDATION_REPETITIONS"
+    --validation-max-rounds "$VALIDATION_MAX_ROUNDS"
+    --validation-safety-margin "$VALIDATION_SAFETY_MARGIN"
     --clock-sync-exchanges "$CLOCK_SYNC_EXCHANGES"
     --max-clock-uncertainty-fraction "$MAX_CLOCK_UNCERTAINTY_FRACTION"
     --max_calibration_inferences "$MAX_CALIBRATION_INFERENCES"
@@ -283,6 +310,9 @@ COMMON_ARGS=(
 )
 if [[ -n "$WARMUP_COOLDOWN_SECONDS" ]]; then
     COMMON_ARGS+=(--warmup_cooldown_seconds "$WARMUP_COOLDOWN_SECONDS")
+fi
+if [[ -n "$VALIDATION_COOLDOWN_SECONDS" ]]; then
+    COMMON_ARGS+=(--validation-cooldown-seconds "$VALIDATION_COOLDOWN_SECONDS")
 fi
 if [[ -n "$INA226_PORT" ]]; then
     COMMON_ARGS+=(--port "$INA226_PORT")

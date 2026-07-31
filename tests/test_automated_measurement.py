@@ -305,8 +305,14 @@ class SshExperimentControllerTests(unittest.TestCase):
             "calibration_initial_inferences": 10,
             "calibration_target_seconds": 0.5,
             "calibration_repetitions": 4,
+            "calibration_sizing_max_attempts": 3,
+            "calibration_duration_tolerance": 0.20,
             "max_relative_mad": 0.15,
             "burst_duration_margin": 1.2,
+            "validation_repetitions": 3,
+            "validation_max_rounds": 3,
+            "validation_safety_margin": 1.1,
+            "validation_cooldown_seconds": None,
             "clock_sync_exchanges": 10,
             "max_clock_uncertainty_fraction": 0.10,
             "max_calibration_inferences": 1_000_000,
@@ -405,6 +411,8 @@ class SshExperimentControllerTests(unittest.TestCase):
         self.assertIn("--stdio_acquisition", command[-1])
         self.assertIn("--backend cuda", command[-1])
         self.assertIn("--burst-duration-margin 1.2", command[-1])
+        self.assertIn("--validation-repetitions 3", command[-1])
+        self.assertIn("--validation-safety-margin 1.1", command[-1])
         self.assertIn("--clock-sync-exchanges 10", command[-1])
         self.assertIn("--max-clock-uncertainty-fraction 0.1", command[-1])
 
@@ -713,8 +721,14 @@ class CommandResultTests(unittest.TestCase):
             calibration_initial_inferences=2,
             calibration_target_seconds=0.1,
             calibration_repetitions=4,
+            calibration_sizing_max_attempts=3,
+            calibration_duration_tolerance=0.20,
             max_relative_mad=0.15,
             burst_duration_margin=1.2,
+            validation_repetitions=3,
+            validation_max_rounds=3,
+            validation_safety_margin=1.1,
+            validation_cooldown_seconds=0.0,
             clock_sync_exchanges=10,
             max_clock_uncertainty_fraction=0.10,
             max_calibration_inferences=1000,

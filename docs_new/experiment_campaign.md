@@ -152,8 +152,14 @@ campaign parameters:
 | `CALIBRATION_INITIAL_INFERENCES` | `20` | Calibration sizing pilot count |
 | `CALIBRATION_TARGET_SECONDS` | `1` s | Target full calibration-batch duration |
 | `CALIBRATION_REPETITIONS` | `8` | Full calibration batches including one discard |
+| `CALIBRATION_SIZING_MAX_ATTEMPTS` | `3` | Attempts to make a calibration batch reach its target duration |
+| `CALIBRATION_DURATION_TOLERANCE` | `0.20` | Accepted relative calibration-duration error |
 | `MAX_RELATIVE_MAD` | `0.15` | MAD/CV threshold for `CALIBRATION_UNSTABLE`; capture continues |
 | `BURST_DURATION_MARGIN` | `1.2` | Automatic burst-duration safety factor |
+| `VALIDATION_REPETITIONS` | `3` | Excluded final-count validation bursts per round |
+| `VALIDATION_MAX_ROUNDS` | `3` | Maximum pre-acquisition correction rounds |
+| `VALIDATION_SAFETY_MARGIN` | `1.1` | Extra count factor after a failed validation round |
+| `VALIDATION_COOLDOWN_SECONDS` | empty | Use `SLEEP_TIME`, or set the pause before each validation burst |
 | `CLOCK_SYNC_EXCHANGES` | `10` | Exchanges in each pre/post clock round |
 | `MAX_CLOCK_UNCERTAINTY_FRACTION` | `0.50` | Above this sample-period fraction processing uses Otsu |
 | `MAX_CALIBRATION_INFERENCES` | `1000000` | Calibration batch safety cap |

@@ -131,6 +131,12 @@ These are the most useful settings:
 | `--target_burst_seconds`      | Desired duration, in seconds, of each real cycle         | `10`                      |
 | `--sampling_rate_hz`          | INA226 samples per second                                | `10`                      |
 | `--burst-duration-margin`     | Safety factor for automatic burst sizing                 | `1.2`                     |
+| `--calibration-sizing-max-attempts` | Attempts to reach the calibration batch duration   | `3`                       |
+| `--calibration-duration-tolerance` | Accepted relative calibration duration error        | `0.20`                    |
+| `--validation-repetitions`   | Excluded final-count validation bursts per round          | `3`                       |
+| `--validation-max-rounds`    | Maximum validation and correction rounds                  | `3`                       |
+| `--validation-safety-margin` | Extra inference-count margin after failed validation      | `1.1`                     |
+| `--validation-cooldown-seconds` | Pause before each validation burst; defaults to sleep  | unset                     |
 | `--clock-sync-exchanges`      | Exchanges in each pre/post synchronization round         | `10`                      |
 | `--max-clock-uncertainty-fraction` | Maximum uncertainty as a sample-period fraction    | `0.50`                    |
 | `--wait_for_acquisition`      | Stops and waits for you to start manual INA226 recording | off                         |
