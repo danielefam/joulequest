@@ -246,6 +246,19 @@ summary with:
 MPLBACKEND=Agg python processing_report/process_and_visualize.py
 ```
 
+To process one measurement with optional trimming, use:
+
+```bash
+python processing_report/data_processing_discard.py measurements/runs/MEASUREMENT.csv \
+  --tail-trim-percentage 1 \
+  --discard-initial-samples \
+  --initial-trim-percentage 5
+```
+
+This removes the lowest 1% and highest 1% power samples in each active region.
+The optional flag also removes the first 5% of samples in time order. Omit the
+flag to keep the first samples.
+
 By default, the script reads `measurements/runs/jetson_nano_base`, finds each
 manifest beside its same-stem CSV, uses the achieved sampling rate recorded for
 that acquisition, and processes only manifests with `status: COMPLETE`.
