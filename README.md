@@ -137,7 +137,7 @@ These are the most useful settings:
 | `--validation-max-rounds`    | Maximum validation and correction rounds                  | `3`                       |
 | `--validation-safety-margin` | Extra inference-count margin after failed validation      | `1.1`                     |
 | `--validation-cooldown-seconds` | Pause before each validation burst; defaults to sleep  | unset                     |
-| `--clock-sync-exchanges`      | Exchanges in each pre/post synchronization round         | `10`                      |
+| `--clock-sync-exchanges`      | Maximum exchanges per pre/post round; precise links stop after at least 3 | `10`                      |
 | `--max-clock-uncertainty-fraction` | Maximum uncertainty as a sample-period fraction    | `0.50`                    |
 | `--wait_for_acquisition`      | Stops and waits for you to start manual INA226 recording | off                         |
 | `--runner-host`               | SSH destination running inference                        | none (single-host fallback) |
@@ -245,6 +245,19 @@ summary with:
 ```bash
 MPLBACKEND=Agg python processing_report/process_and_visualize.py
 ```
+
+To process one measurement with optional trimming, use:
+
+```bash
+python processing_report/data_processing_discard.py measurements/runs/MEASUREMENT.csv \
+  --tail-trim-percentage 1 \
+  --discard-initial-samples \
+  --initial-trim-percentage 5
+```
+
+This removes the lowest 1% and highest 1% power samples in each active region.
+The optional flag also removes the first 5% of samples in time order. Omit the
+flag to keep the first samples.
 
 By default, the script reads `measurements/runs/jetson_nano_base`, finds each
 manifest beside its same-stem CSV, uses the achieved sampling rate recorded for

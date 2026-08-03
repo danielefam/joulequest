@@ -277,6 +277,106 @@ class StdioAcquisitionControllerTests(unittest.TestCase):
             ["pre:1", "pre:2"],
         )
 
+    def test_clock_sync_stops_early_only_with_precise_samples(self):
+        def synchronize(
+            exchange_count,
+            runner_elapsed,
+            controller_processing,
+            controller_offsets=None,
+            fail_first=False,
+        ):
+            responses = []
+            monotonic_values = []
+            for exchange_index in range(1, exchange_count + 1):
+                runner_sent = float(exchange_index)
+                controller_offset = (
+                    10.0
+                    if controller_offsets is None
+                    else controller_offsets[exchange_index - 1]
+                )
+                controller_received = runner_sent + controller_offset + 0.0005
+                response = json.dumps(
+                    {
+                        "command": "CLOCK_SYNC_RESPONSE",
+                        "campaign_id": "campaign-123",
+                        "request_id": f"pre:{exchange_index}",
+                        "result": {
+                            "controller_received_monotonic_seconds": (
+                                controller_received
+                            ),
+                            "controller_sent_monotonic_seconds": (
+                                controller_received + controller_processing
+                            ),
+                        },
+                    }
+                )
+                responses.append(
+                    "invalid JSON"
+                    if fail_first and exchange_index == 1
+                    else response
+                )
+                monotonic_values.extend(
+                    [runner_sent, runner_sent + runner_elapsed]
+                )
+
+            output_stream = io.StringIO()
+            values = iter(monotonic_values)
+            controller = StdioAcquisitionController(
+                io.StringIO("\n".join(responses) + "\n"),
+                output_stream,
+                monotonic_fn=lambda: next(values),
+                max_clock_uncertainty_fraction=0.10,
+            )
+            controller.describe(
+                "campaign-123",
+                {"sampling_rate_hz": 10.0},
+            )
+            result = controller.synchronize_clock("pre", exchange_count)
+            requests = output_stream.getvalue().splitlines()
+            return result, requests
+
+        precise, precise_requests = synchronize(
+            exchange_count=10,
+            runner_elapsed=0.002,
+            controller_processing=0.0005,
+        )
+        self.assertTrue(precise["stopped_early"])
+        self.assertEqual(precise["attempted_exchange_count"], 3)
+        self.assertEqual(precise["valid_exchange_count"], 3)
+        self.assertEqual(len(precise_requests), 3)
+
+        noisy, noisy_requests = synchronize(
+            exchange_count=4,
+            runner_elapsed=0.020,
+            controller_processing=0.001,
+        )
+        self.assertFalse(noisy["stopped_early"])
+        self.assertEqual(noisy["attempted_exchange_count"], 4)
+        self.assertEqual(noisy["valid_exchange_count"], 4)
+        self.assertEqual(len(noisy_requests), 4)
+
+        inconsistent, inconsistent_requests = synchronize(
+            exchange_count=4,
+            runner_elapsed=0.002,
+            controller_processing=0.0005,
+            controller_offsets=[10.0, 10.02, 10.0, 10.0],
+        )
+        self.assertFalse(inconsistent["stopped_early"])
+        self.assertEqual(inconsistent["attempted_exchange_count"], 4)
+        self.assertEqual(len(inconsistent_requests), 4)
+
+        failed, failed_requests = synchronize(
+            exchange_count=5,
+            runner_elapsed=0.002,
+            controller_processing=0.0005,
+            fail_first=True,
+        )
+        self.assertFalse(failed["stopped_early"])
+        self.assertEqual(failed["attempted_exchange_count"], 5)
+        self.assertEqual(failed["valid_exchange_count"], 4)
+        self.assertEqual(len(failed["errors"]), 1)
+        self.assertEqual(len(failed_requests), 5)
+
     def test_json_handshake_uses_campaign_id_and_preserves_results(self):
         input_stream = io.StringIO(
             json.dumps(
@@ -376,12 +476,19 @@ class StdioAcquisitionControllerTests(unittest.TestCase):
                 run_manager_module,
                 "RunManager",
                 return_value=manager,
-            ),
+            ) as manager_class,
             patch.dict("sys.modules", {"runner": runner_module}),
             redirect_stdout(output),
         ):
             run_manager_module.main()
 
+        acquisition_controller = manager_class.call_args.kwargs[
+            "acquisition_controller"
+        ]
+        self.assertEqual(
+            acquisition_controller.max_clock_uncertainty_fraction,
+            0.10,
+        )
         payload = json.loads(output.getvalue())
         self.assertEqual(payload["event"], "RUN_MANIFEST")
         self.assertEqual(payload["manifest"], manifest)
