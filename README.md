@@ -258,6 +258,7 @@ python processing_report/data_processing_discard.py measurements/runs/MEASUREMEN
 This removes the lowest 1% and highest 1% power samples in each active region.
 The optional flag also removes the first 5% of samples in time order. Omit the
 flag to keep the first samples.
+Trimming is skipped when a cycle has fewer than 10 inferences.
 
 By default, the script reads `measurements/runs/jetson_nano_base`, finds each
 manifest beside its same-stem CSV, uses the achieved sampling rate recorded for

@@ -71,6 +71,12 @@ def build_parser():
         help="Initial time-ordered percentage removed when its flag is set.",
     )
     parser.add_argument(
+        "--min-inferences-for-trimming",
+        type=int,
+        default=10,
+        help="Minimum inferences per cycle required before sample trimming.",
+    )
+    parser.add_argument(
         "--filter-after-discard",
         action="store_true",
         help="Apply Hampel replacement and then a rolling mean after discarding.",
@@ -110,6 +116,7 @@ def _processing_config(args):
         tail_trim_fraction=args.tail_trim_percentage / 100.0,
         discard_initial_samples=args.discard_initial_samples,
         initial_trim_fraction=args.initial_trim_percentage / 100.0,
+        min_inferences_for_trimming=args.min_inferences_for_trimming,
         filter_after_discard=args.filter_after_discard,
         hampel_window_seconds=args.hampel_window_seconds,
         hampel_sigma=args.hampel_sigma,

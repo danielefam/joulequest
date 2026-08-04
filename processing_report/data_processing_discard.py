@@ -29,6 +29,7 @@ class ProcessingConfig:
     tail_trim_fraction: float = 0.01
     discard_initial_samples: bool = False
     initial_trim_fraction: float = 0.01
+    min_inferences_for_trimming: int = 10
     filter_after_discard: bool = False
     hampel_window_seconds: float = 0.21
     hampel_sigma: float = 4.5
@@ -62,6 +63,8 @@ class ProcessingConfig:
             raise ValueError("tail_trim_fraction must be in [0, 0.5)")
         if not 0 <= self.initial_trim_fraction < 1:
             raise ValueError("initial_trim_fraction must be in [0, 1)")
+        if self.min_inferences_for_trimming < 1:
+            raise ValueError("min_inferences_for_trimming must be positive")
 
 
 @dataclass
@@ -410,9 +413,15 @@ def _sample_durations(times, sampling_rate_hz):
     return durations
 
 
-def _discard_masks(samples, config):
+def _discard_masks(samples, config, inference_count):
     power_outliers = np.zeros(len(samples), dtype=bool)
     initial_discards = np.zeros(len(samples), dtype=bool)
+    trimming_enabled = (
+        inference_count is not None
+        and inference_count >= config.min_inferences_for_trimming
+    )
+    if not trimming_enabled:
+        return power_outliers, initial_discards, False
 
     for start, end in _run_bounds(samples["is_active"]):
         sample_count = end - start
@@ -427,7 +436,7 @@ def _discard_masks(samples, config):
             initial_count = int(config.initial_trim_fraction * sample_count)
             initial_discards[start : start + initial_count] = True
 
-    return power_outliers, initial_discards
+    return power_outliers, initial_discards, True
 
 
 def _filter_power_after_discard(
@@ -606,7 +615,16 @@ def process_measurement(csv_path, manifest_path=None, config=None):
     samples["time_s"] = time_axis
     samples["power_raw_W"] = power
     samples["is_active"] = active
-    power_outliers, initial_discards = _discard_masks(samples, config)
+    inference_count = (
+        manifest.get("plan", {}).get("inferences_per_cycle")
+        if manifest
+        else None
+    )
+    power_outliers, initial_discards, trimming_enabled = _discard_masks(
+        samples,
+        config,
+        inference_count,
+    )
     discarded = power_outliers | initial_discards
     cleaned, smoothed, hampel_outliers = _filter_power_after_discard(
         power,
@@ -656,6 +674,12 @@ def process_measurement(csv_path, manifest_path=None, config=None):
         "outlier_count": int(discarded.sum()),
         "power_outlier_count": int(power_outliers.sum()),
         "initial_discard_count": int(initial_discards.sum()),
+        "trimming_enabled": trimming_enabled,
+        "trimming_skip_reason": (
+            None
+            if trimming_enabled
+            else "TRIMMING_SKIPPED_TOO_FEW_INFERENCES"
+        ),
         "hampel_outlier_count": int(hampel_outliers.sum()),
         "filter_after_discard": config.filter_after_discard,
         "outlier_fraction": float(discarded.mean()),
@@ -810,6 +834,12 @@ def build_parser():
         help="Initial time-ordered percentage removed when its flag is set.",
     )
     parser.add_argument(
+        "--min-inferences-for-trimming",
+        type=int,
+        default=10,
+        help="Minimum inferences per cycle required before sample trimming.",
+    )
+    parser.add_argument(
         "--filter-after-discard",
         action="store_true",
         help=(
@@ -850,6 +880,7 @@ def main():
         tail_trim_fraction=args.tail_trim_percentage / 100.0,
         discard_initial_samples=args.discard_initial_samples,
         initial_trim_fraction=args.initial_trim_percentage / 100.0,
+        min_inferences_for_trimming=args.min_inferences_for_trimming,
         filter_after_discard=args.filter_after_discard,
         hampel_window_seconds=args.hampel_window_seconds,
         hampel_sigma=args.hampel_sigma,

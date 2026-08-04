@@ -226,6 +226,43 @@ class TailTrimProcessingTests(unittest.TestCase):
         self.assertAlmostEqual(with_region["start_time_s"], 0.3)
         self.assertAlmostEqual(with_region["effective_inference_count"], 40.0)
 
+    def test_trimming_is_skipped_below_minimum_inference_count(self):
+        elapsed = np.arange(13) / 10.0
+        power = np.array(
+            [1.0, 10.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 0.0, 1.0, 1.0]
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            csv_path = Path(temp_dir) / "synthetic.csv"
+            pd.DataFrame(
+                {
+                    "Sample": np.arange(len(elapsed)),
+                    "Elapsed Time (s)": elapsed,
+                    POWER_COLUMN: power,
+                }
+            ).to_csv(csv_path, index=False)
+            csv_path.with_suffix(".json").write_text(
+                json.dumps(self._aligned_manifest(inferences_per_cycle=5)),
+                encoding="utf-8",
+            )
+
+            result = process_measurement(
+                csv_path,
+                config=ProcessingConfig(
+                    tail_trim_fraction=0.1,
+                    discard_initial_samples=True,
+                    initial_trim_fraction=0.2,
+                ),
+            )
+
+        self.assertFalse(result.summary["trimming_enabled"])
+        self.assertEqual(
+            result.summary["trimming_skip_reason"],
+            "TRIMMING_SKIPPED_TOO_FEW_INFERENCES",
+        )
+        self.assertEqual(result.summary["outlier_count"], 0)
+        self.assertEqual(result.regions.iloc[0]["retained_sample_count"], 10)
+
     def test_optional_filters_run_after_discarding_extreme_samples(self):
         elapsed = np.arange(15) / 10.0
         power = np.array(
@@ -309,6 +346,7 @@ class TailTrimProcessingTests(unittest.TestCase):
         self.assertEqual(config.tail_trim_fraction, 0.025)
         self.assertTrue(config.discard_initial_samples)
         self.assertEqual(config.initial_trim_fraction, 0.04)
+        self.assertEqual(config.min_inferences_for_trimming, 10)
         self.assertTrue(config.filter_after_discard)
         self.assertEqual(config.hampel_window_seconds, 0.31)
         self.assertEqual(config.hampel_sigma, 3.5)
