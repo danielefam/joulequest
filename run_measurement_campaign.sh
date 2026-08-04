@@ -20,6 +20,8 @@ MODEL_ROOT="${MODEL_ROOT:-Models/CUDA}"
 MODEL_SUFFIX="${MODEL_SUFFIX:-.pt}"
 LINEAR_MODEL_DIRECTORY="${LINEAR_MODEL_DIRECTORY:-${MODEL_ROOT}/Linear}"
 CONV_MODEL_DIRECTORY="${CONV_MODEL_DIRECTORY:-${MODEL_ROOT}/Conv}"
+LENET_MODEL_DIRECTORY="${LENET_MODEL_DIRECTORY:-${MODEL_ROOT}/Lenet}"
+LENET_MODEL_PATH="${LENET_MODEL_PATH:-${LENET_MODEL_DIRECTORY}/Lenet${MODEL_SUFFIX}}"
 
 NUMBER_OF_CYCLES="${NUMBER_OF_CYCLES:-100}"
 SLEEP_TIME="${SLEEP_TIME:-3}"
@@ -73,7 +75,7 @@ Usage:
 
 Options:
   --board LABEL       Safe label used only for the local result directory.
-  --suite SUITE       linear, conv, or all (default: all).
+    --suite SUITE       linear, conv, lenet, or all (default: all).
   --dry-run           Print commands without running measurements.
   --continue-on-error Continue after an experiment exits nonzero.
   --repeat-completed  Rerun experiments with an existing COMPLETE manifest.
@@ -86,6 +88,7 @@ the script finishes, then invoke it again with a new BOARD_LABEL/configuration.
 
 Examples:
   ./run_measurement_campaign.sh --board jetson_nano --suite all
+    ./run_measurement_campaign.sh --board jetson_nano --suite lenet
   ./run_measurement_campaign.sh --board pi5 --suite linear --dry-run
 
 Override parameters without editing the script:
@@ -183,8 +186,8 @@ done
 [[ -n "$BOARD_LABEL" ]] || die "--board is required"
 [[ "$BOARD_LABEL" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] ||
     die "--board may contain only letters, numbers, dot, underscore, and dash"
-[[ "$SUITE" == "linear" || "$SUITE" == "conv" || "$SUITE" == "all" ]] ||
-    die "--suite must be linear, conv, or all"
+[[ "$SUITE" == "linear" || "$SUITE" == "conv" || "$SUITE" == "all" || "$SUITE" == "lenet" ]] ||
+    die "--suite must be linear, conv, lenet or all"
 [[ "$BACKEND" == "cpu" || "$BACKEND" == "cuda" || "$BACKEND" == "tpu" ]] ||
     die "BACKEND must be cpu, cuda, or tpu"
 [[ "$NUMBER_OF_CYCLES" =~ ^[1-9][0-9]*$ ]] ||
@@ -320,17 +323,21 @@ fi
 
 linear_total=0
 conv_total=0
+lenet_total=0
 if [[ "$SUITE" == "linear" || "$SUITE" == "all" ]]; then
     linear_total=$((${#LINEAR_SIZE_LIST[@]} * ${#LINEAR_SIZE_LIST[@]}))
 fi
 if [[ "$SUITE" == "conv" || "$SUITE" == "all" ]]; then
     conv_total=$((${#CONV_INPUT_CHANNEL_LIST[@]} * ${#CONV_IMAGE_SIZE_LIST[@]} * ${#CONV_KERNEL_PADDING_LIST[@]}))
 fi
-total=$((linear_total + conv_total))
+if [[ "$SUITE" == "lenet" ]]; then
+    lenet_total=1
+fi
+total=$((linear_total + conv_total + lenet_total))
 
 printf 'Board label: %s\n' "$BOARD_LABEL"
-printf 'Suite: %s (%d Linear, %d Conv, %d total)\n' \
-    "$SUITE" "$linear_total" "$conv_total" "$total"
+printf 'Suite: %s (%d Linear, %d Conv, %d LeNet, %d total)\n' \
+    "$SUITE" "$linear_total" "$conv_total" "$lenet_total" "$total"
 printf 'Results: %s\n' "$OUTPUT_DIRECTORY"
 ((DRY_RUN == 0)) || printf 'Mode: dry-run (no measurements will start)\n'
 
@@ -449,6 +456,10 @@ if [[ "$SUITE" == "conv" || "$SUITE" == "all" ]]; then
             done
         done
     done
+fi
+
+if [[ "$SUITE" == "lenet" ]]; then
+    run_experiment "$LENET_MODEL_PATH"
 fi
 
 printf '\nCampaign finished for board %s.\n' "$BOARD_LABEL"
