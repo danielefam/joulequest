@@ -69,6 +69,7 @@ if _tf_available:
 
 if _torch_available:
     torch = importlib.import_module("torch")
+    nn = torch.nn
 
     class TorchRunner(InferenceRunner):
         """PyTorch runner"""
@@ -149,6 +150,11 @@ if _torch_available:
                         "padding": params[3],
                         }
 
+            elif layer_type == "lenet":
+                return {
+                    "type": "lenet"
+                }
+
             raise ValueError(f"Unsupported layer type in model name: {layer_type}")
 
         def _build_model(self):
@@ -166,6 +172,21 @@ if _torch_available:
                     kernel_size=self.params["kernel_size"],
                     padding=self.params["padding"],
                 ).to(self.device)
+
+            if self.params["type"] == 'lenet':
+                return nn.Sequential(
+                        nn.Conv2d(1,8,5),
+                        nn.MaxPool2d(2),
+                        nn.ReLU(),
+                        nn.Conv2d(8,32,5),
+                        nn.MaxPool2d(2),
+                        nn.AdaptiveMaxPool2d(4),
+                        nn.ReLU(),
+                        nn.Flatten(),
+                        nn.Linear(512,128),
+                        nn.ReLU(),
+                        nn.Linear(128,64)
+                    ).to(self.device)
 
             raise ValueError(f"Unsupported layer type: {self.params['type']}")
 
@@ -185,6 +206,8 @@ if _torch_available:
                             self.params["image_size"],
                             self.params["image_size"],
                             )
+                elif self.params["type"] == "lenet":
+                    shape = (1,1,32,32)
 
                 else:
                     raise ValueError(f"Unsupported layer type: {self.params['type']}")
