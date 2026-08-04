@@ -156,11 +156,25 @@ Example with shorter cycles:
 
 ```bash
 python run_manager.py \
-  --backend cuda \
-  --model Models/CUDA/Linear/Linear_64_64.pt \
-  --number_of_cycles 3 \
-  --sleep_time 5 \
-  --target_burst_seconds 5 \
+  --backend cpu \
+  --model Models/CPU/Linear/Linear_64_64.pt \
+  --number_of_cycles 1 \
+  --sleep_time 0 \
+  --target_burst_seconds 0.5 \
+  --sampling_rate_hz 100 \
+  --min_active_samples 50 \
+  --warmup_inferences 5 \
+  --warmup_seconds 0 \
+  --warmup_cooldown_seconds 0 \
+  --calibration_initial_inferences 2 \
+  --calibration_target_seconds 0.1 \
+  --calibration_repetitions 2 \
+  --calibration-sizing-max-attempts 1 \
+  --validation-repetitions 1 \
+  --validation-max-rounds 3 \
+  --leading_idle_seconds 0 \
+  --trailing_idle_seconds 0 \
+  --safety_margin_seconds 0 \
   --wait_for_acquisition
 ```
 
