@@ -167,6 +167,22 @@ if _torch_available:
                     "type": "lenet"
                 }
 
+            elif layer_type == "maxpool":
+                return {
+                        "type": "maxpool",
+                        "in_channels": params[0],
+                        "image_size": params[1],
+                        "kernel_size": params[2],
+                }
+
+            elif layer_type == "adapool":
+                return {
+                    "type":"adapool",
+                    "in_channels": params[0],
+                    "image_size": params[1],
+                    "output_size": params[2]
+                }
+
             raise ValueError(f"Unsupported layer type in model name: {layer_type}")
 
         def _build_model(self):
@@ -199,6 +215,16 @@ if _torch_available:
                         nn.ReLU(),
                         nn.Linear(128,64)
                     ).to(self.device)
+            
+            if self.params["type"] == 'maxpool':
+                return torch.nn.MaxPool2d(
+                    self.params["kernel_size"]
+                )
+
+            if self.params["type"] == 'adapool':
+                return torch.nn.AdaptiveMaxPool2d(
+                    self.params["output_size"]
+                )
 
             raise ValueError(f"Unsupported layer type: {self.params['type']}")
 
@@ -220,6 +246,23 @@ if _torch_available:
                             )
                 elif self.params["type"] == "lenet":
                     shape = (1,1,32,32)
+
+                elif self.params["type"] == "maxpool":
+                    shape = (
+                                    1,
+                                    self.params["in_channels"],
+                                    self.params["image_size"],
+                                    self.params["image_size"],
+                    )
+
+                elif self.params["type"] == "adapool":
+                    shape = (
+                                    1,
+                                    self.params["in_channels"],
+                                    self.params["image_size"],
+                                    self.params["image_size"],
+                    )
+                
 
                 else:
                     raise ValueError(f"Unsupported layer type: {self.params['type']}")
