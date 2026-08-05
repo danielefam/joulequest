@@ -137,7 +137,7 @@ if _torch_available:
                         }
 
             elif layer_type == "conv":
-                if len(params) != 4 or len(params) != 5:
+                if len(params) != 4 and len(params) != 5:
                     raise ValueError(
                         "Conv model names must be "
                         "Conv_<in_channels>_<image_size>_<kernel_size>_<padding>"
