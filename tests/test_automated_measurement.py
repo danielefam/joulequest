@@ -694,6 +694,28 @@ class SshExperimentControllerTests(unittest.TestCase):
         acquisition.stop.assert_called_once_with()
 
 
+class ArgumentParserTests(unittest.TestCase):
+    def test_measurement_defaults_match_campaign_profile(self):
+        args = automated.build_argument_parser().parse_args([
+            "--backend", "cuda",
+            "--model", "Models/CUDA/Linear/Linear_64_64.pt",
+            "--output-directory", "measurements/runs/test",
+            "--shunt-ohms", "0.012",
+            "--max-expected-current-a", "5.0",
+        ])
+
+        self.assertEqual(args.number_of_cycles, 100)
+        self.assertEqual(args.sleep_time, 3.0)
+        self.assertEqual(args.target_burst_seconds, 0.0)
+        self.assertEqual(args.sampling_rate_hz, 100.0)
+        self.assertEqual(args.min_active_samples, 100)
+        self.assertEqual(args.warmup_inferences, 20)
+        self.assertEqual(args.calibration_initial_inferences, 20)
+        self.assertEqual(args.calibration_target_seconds, 1.0)
+        self.assertEqual(args.calibration_repetitions, 8)
+        self.assertEqual(args.trailing_idle_seconds, 30.0)
+
+
 class CommandResultTests(unittest.TestCase):
     @staticmethod
     def _args():

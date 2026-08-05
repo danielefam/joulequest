@@ -69,6 +69,7 @@ if _tf_available:
 
 if _torch_available:
     torch = importlib.import_module("torch")
+    nn = torch.nn
 
     class TorchRunner(InferenceRunner):
         """PyTorch runner"""
@@ -136,18 +137,51 @@ if _torch_available:
                         }
 
             elif layer_type == "conv":
-                if len(params) != 4:
+                if len(params) != 4 and len(params) != 5:
                     raise ValueError(
                         "Conv model names must be "
                         "Conv_<in_channels>_<image_size>_<kernel_size>_<padding>"
                     )
-                return  {
+
+                if len(params) == 4:
+                    return  {
+                            "type": "conv",
+                            "in_channels": params[0],
+                            "image_size": params[1],
+                            "kernel_size": params[2],
+                            "padding": params[3],
+                            "out_channels": 1,
+                            }
+                
+                return {
                         "type": "conv",
                         "in_channels": params[0],
                         "image_size": params[1],
                         "kernel_size": params[2],
                         "padding": params[3],
+                        "out_channels": params[4],
                         }
+
+            elif layer_type == "lenet":
+                return {
+                    "type": "lenet"
+                }
+
+            elif layer_type == "maxpool":
+                return {
+                        "type": "maxpool",
+                        "in_channels": params[0],
+                        "image_size": params[1],
+                        "kernel_size": params[2],
+                }
+
+            elif layer_type == "adapool":
+                return {
+                    "type":"adapool",
+                    "in_channels": params[0],
+                    "image_size": params[1],
+                    "output_size": params[2]
+                }
 
             raise ValueError(f"Unsupported layer type in model name: {layer_type}")
 
@@ -162,10 +196,35 @@ if _torch_available:
             if self.params["type"] == "conv":
                 return torch.nn.Conv2d(
                     self.params["in_channels"],
-                    1,
+                    self.params["out_channels"],
                     kernel_size=self.params["kernel_size"],
                     padding=self.params["padding"],
                 ).to(self.device)
+
+            if self.params["type"] == 'lenet':
+                return nn.Sequential(
+                        nn.Conv2d(1,8,5),
+                        nn.MaxPool2d(2),
+                        nn.ReLU(),
+                        nn.Conv2d(8,32,5),
+                        nn.MaxPool2d(2),
+                        nn.AdaptiveMaxPool2d(4),
+                        nn.ReLU(),
+                        nn.Flatten(),
+                        nn.Linear(512,128),
+                        nn.ReLU(),
+                        nn.Linear(128,64)
+                    ).to(self.device)
+            
+            if self.params["type"] == 'maxpool':
+                return torch.nn.MaxPool2d(
+                    self.params["kernel_size"]
+                )
+
+            if self.params["type"] == 'adapool':
+                return torch.nn.AdaptiveMaxPool2d(
+                    self.params["output_size"]
+                )
 
             raise ValueError(f"Unsupported layer type: {self.params['type']}")
 
@@ -185,6 +244,25 @@ if _torch_available:
                             self.params["image_size"],
                             self.params["image_size"],
                             )
+                elif self.params["type"] == "lenet":
+                    shape = (1,1,32,32)
+
+                elif self.params["type"] == "maxpool":
+                    shape = (
+                                    1,
+                                    self.params["in_channels"],
+                                    self.params["image_size"],
+                                    self.params["image_size"],
+                    )
+
+                elif self.params["type"] == "adapool":
+                    shape = (
+                                    1,
+                                    self.params["in_channels"],
+                                    self.params["image_size"],
+                                    self.params["image_size"],
+                    )
+                
 
                 else:
                     raise ValueError(f"Unsupported layer type: {self.params['type']}")
