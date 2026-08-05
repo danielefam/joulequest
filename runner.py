@@ -137,17 +137,29 @@ if _torch_available:
                         }
 
             elif layer_type == "conv":
-                if len(params) != 4:
+                if len(params) != 4 or len(params) != 5:
                     raise ValueError(
                         "Conv model names must be "
                         "Conv_<in_channels>_<image_size>_<kernel_size>_<padding>"
                     )
-                return  {
+
+                if len(params) == 4:
+                    return  {
+                            "type": "conv",
+                            "in_channels": params[0],
+                            "image_size": params[1],
+                            "kernel_size": params[2],
+                            "padding": params[3],
+                            "out_channels": 1,
+                            }
+                
+                return {
                         "type": "conv",
                         "in_channels": params[0],
                         "image_size": params[1],
                         "kernel_size": params[2],
                         "padding": params[3],
+                        "out_channels": params[4],
                         }
 
             elif layer_type == "lenet":
@@ -168,7 +180,7 @@ if _torch_available:
             if self.params["type"] == "conv":
                 return torch.nn.Conv2d(
                     self.params["in_channels"],
-                    1,
+                    self.params["out_channels"],
                     kernel_size=self.params["kernel_size"],
                     padding=self.params["padding"],
                 ).to(self.device)

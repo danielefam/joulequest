@@ -169,7 +169,7 @@ def process_file(csv_path, metadata, args, combined_axis):
         "threshold_W": result.summary["threshold_W"],
         "power_mean_W": power_offsets.mean(),
         "power_variance_W2": power_offsets.var(ddof=1),
-        "energy_mean_J": energies.mean(),
+        "energy_mean_mJ": energies.mean()*1000,
         "energy_variance_J2": energies.var(ddof=1),
         "outlier_count": result.summary["outlier_count"],
         "power_outlier_count": result.summary["power_outlier_count"],
