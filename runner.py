@@ -183,6 +183,14 @@ if _torch_available:
                     "output_size": params[2]
                 }
 
+            elif layer_type == "attention":
+                return{
+                    "type":"attention",
+                    "input_token": params[0],
+                    "embed_dim": params[1],
+                    "num_heads": params[2],
+                }
+
             raise ValueError(f"Unsupported layer type in model name: {layer_type}")
 
         def _build_model(self):
@@ -226,6 +234,12 @@ if _torch_available:
                     self.params["output_size"]
                 )
 
+            if self.params["type"] == 'attention':
+                return nn.MultiheadAttention(
+                    self.params["embed_dim"],
+                    self.params["num_heads"]
+                )
+
             raise ValueError(f"Unsupported layer type: {self.params['type']}")
 
         def generate_input(self):
@@ -261,6 +275,12 @@ if _torch_available:
                                     self.params["in_channels"],
                                     self.params["image_size"],
                                     self.params["image_size"],
+                    )
+
+                elif self.params["type"] == "attention":
+                    shape = (
+                        1,
+                        self.params["input_token"]
                     )
                 
 
