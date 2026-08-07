@@ -71,6 +71,21 @@ if _torch_available:
     torch = importlib.import_module("torch")
     nn = torch.nn
 
+    class SelfAttention(nn.Module):
+        """Unary self-attention layer for the common query/key/value input."""
+
+        def __init__(self, embed_dim, num_heads):
+            super().__init__()
+            self.attention = nn.MultiheadAttention(embed_dim, num_heads)
+
+        def forward(self, inputs):
+            return self.attention(
+                inputs,
+                inputs,
+                inputs,
+                need_weights=False,
+            )[0]
+
     class TorchRunner(InferenceRunner):
         """PyTorch runner"""
 
@@ -227,18 +242,18 @@ if _torch_available:
             if self.params["type"] == 'maxpool':
                 return torch.nn.MaxPool2d(
                     self.params["kernel_size"]
-                )
+                ).to(self.device)
 
             if self.params["type"] == 'adapool':
                 return torch.nn.AdaptiveMaxPool2d(
                     self.params["output_size"]
-                )
+                ).to(self.device)
 
             if self.params["type"] == 'attention':
-                return nn.MultiheadAttention(
+                return SelfAttention(
                     self.params["embed_dim"],
                     self.params["num_heads"]
-                )
+                ).to(self.device)
 
             raise ValueError(f"Unsupported layer type: {self.params['type']}")
 
@@ -279,8 +294,9 @@ if _torch_available:
 
                 elif self.params["type"] == "attention":
                     shape = (
+                        self.params["input_token"],
                         1,
-                        self.params["input_token"]
+                        self.params["embed_dim"],
                     )
                 
 
