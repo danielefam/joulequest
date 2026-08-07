@@ -106,6 +106,12 @@ class TorchRunnerLegacyCompatibilityTests(unittest.TestCase):
                 (1, 8, 8, 8),
                 (1, 8, 8, 8),
             ),
+            (
+                "Flatten_1_32_4_4.pt",
+                {"type": "flatten", "input_shape": (1, 32, 4, 4)},
+                (1, 32, 4, 4),
+                (1, 512),
+            ),
         ]
 
         for model_name, expected_params, input_shape, output_shape in cases:

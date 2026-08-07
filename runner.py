@@ -272,6 +272,11 @@ if _torch_available:
             build=lambda params: nn.SiLU(),
             input_shape=lambda params: params["input_shape"],
         ),
+        "flatten": TorchLayerDefinition(
+            parse=_parse_activation("flatten"),
+            build=lambda params: nn.Flatten(),
+            input_shape=lambda params: params["input_shape"],
+        ),
     }
 
     class TorchRunner(InferenceRunner):
@@ -318,9 +323,9 @@ if _torch_available:
 
         def _extract_layer_info(self):
             """Extract and validate a registered layer filename schema."""
-            filename = os.path.splitext(os.path.basename(self.model_path))[0]
+            filename = os.path.splitext(os.path.basename(self.model_path))[0].lower()
             parts = filename.split("_")
-            layer_type = parts[0].lower()
+            layer_type = parts[0]
             try:
                 params = [int(p) for p in parts[1:]]
             except ValueError as error:
