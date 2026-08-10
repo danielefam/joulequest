@@ -9,9 +9,9 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 try:
-    from . import data_processing_discard as dp
+    from . import data_processing as dp
 except ImportError:
-    import data_processing_discard as dp
+    import processing_report.data_processing as dp
 
 try:
     from .artifact_paths import get_manifest_file_path, load_measurement_metadata

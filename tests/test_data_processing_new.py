@@ -6,214 +6,22 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from processing_report import process_and_visualize
 from processing_report.data_processing import (
     POWER_COLUMN,
     ProcessingConfig,
+    build_parser,
     process_measurement,
 )
 
 
-class CleanDataProcessingTests(unittest.TestCase):
-    def test_isolated_spike_is_replaced_without_removing_step_edges(self):
-        sampling_rate_hz = 100.0
-        sample_count = 400
-        time_seconds = np.arange(sample_count) / sampling_rate_hz
-        power = 0.30 + 0.005 * np.sin(np.arange(sample_count))
-        power[100:200] += 1.20
-        power[50] = 3.0
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            csv_path = Path(temp_dir) / "synthetic.csv"
-            pd.DataFrame(
-                {
-                    "Sample": np.arange(sample_count),
-                    "Elapsed Time (s)": time_seconds,
-                    POWER_COLUMN: power,
-                }
-            ).to_csv(csv_path, index=False)
-
-            result = process_measurement(
-                csv_path,
-                config=ProcessingConfig(sampling_rate_hz=sampling_rate_hz),
-            )
-
-        self.assertTrue(result.samples.loc[50, "is_outlier"])
-        self.assertAlmostEqual(
-            result.samples.loc[50, "power_clean_W"], 0.30, places=2
-        )
-        self.assertFalse(result.samples.loc[100, "is_outlier"])
-        self.assertFalse(result.samples.loc[199, "is_outlier"])
-        self.assertEqual(result.summary["active_region_count"], 1)
-        self.assertEqual(len(result.samples), sample_count)
-
-    def test_legacy_manifest_uses_otsu_and_signal_preparation(self):
-        sampling_rate_hz = 100.0
-        sample_count = 500
-        start = pd.Timestamp("2026-07-27T10:00:00Z")
-        timestamps = start + pd.to_timedelta(
-            np.arange(sample_count) / sampling_rate_hz, unit="s"
-        )
-        power = np.full(sample_count, 0.3)
-        power[100:120] = 0.6
-        power[120:221] = 1.5
-        power[320:330] = 0.6
-        power[330:431] = 1.5
-
-        def event_time(offset_seconds):
-            return (start + pd.to_timedelta(offset_seconds, unit="s")).isoformat()
-
-        manifest = {
-            "schema_version": 1,
-            "status": "COMPLETE",
-            "workload_policy": {
-                "input": "fresh_per_burst",
-                "parameters": "fresh_per_burst",
-            },
-            "plan": {
-                "inferences_per_cycle": 100,
-                "number_of_cycles": 2,
-                "leading_idle_seconds": 1.0,
-                "sleep_time_seconds": 1.0,
-            },
-            "acquisition": {
-                "started_at_utc": event_time(0),
-                "sampling_rate_hz": sampling_rate_hz,
-            },
-            "measurement": {
-                "cycles": [
-                    {
-                        "start_event": {"wall_time_utc": event_time(1.2)},
-                        "end_event": {"wall_time_utc": event_time(2.2)},
-                    },
-                    {
-                        "start_event": {"wall_time_utc": event_time(3.3)},
-                        "end_event": {"wall_time_utc": event_time(4.3)},
-                    },
-                ]
-            },
-        }
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            directory = Path(temp_dir)
-            csv_path = directory / "synthetic.csv"
-            manifest_path = directory / "synthetic.json"
-            pd.DataFrame(
-                {
-                    "Sample": np.arange(sample_count),
-                    "Timestamp UTC": timestamps,
-                    "Elapsed Time (s)": np.arange(sample_count) / sampling_rate_hz,
-                    POWER_COLUMN: power,
-                }
-            ).to_csv(csv_path, index=False)
-            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-
-            result = process_measurement(csv_path)
-
-        phase_counts = result.samples["phase"].value_counts()
-        self.assertEqual(result.summary["active_region_count"], 2)
-        self.assertEqual(
-            result.summary["active_classification_source"],
-            "signal hysteresis (Otsu fallback)",
-        )
-        self.assertEqual(
-            result.summary["preparation_classification_source"],
-            "signal before each active region",
-        )
-        self.assertEqual(
-            result.summary["clock_alignment_fallback_reason"],
-            "LEGACY_MANIFEST_NO_ALIGNMENT",
-        )
-        self.assertGreater(phase_counts["input_and_parameter_preparation"], 0)
-        self.assertFalse(result.summary["one_time_model_preparation_observed"])
-
-    def test_aligned_elapsed_bounds_allow_half_sample_clock_uncertainty(self):
-        sampling_rate_hz = 100.0
-        sample_count = 500
-        elapsed = np.arange(sample_count) / sampling_rate_hz
-        power = np.full(sample_count, 0.3)
-        power[120:221] = 1.5
-        power[330:431] = 1.5
-        manifest = {
+class TailTrimProcessingTests(unittest.TestCase):
+    @staticmethod
+    def _aligned_manifest(inferences_per_cycle=100):
+        return {
             "schema_version": 2,
-            "workload_policy": {
-                "input": "fresh_per_burst",
-                "parameters": "fresh_per_burst",
-            },
             "plan": {
-                "inferences_per_cycle": 100,
-                "number_of_cycles": 2,
-                "leading_idle_seconds": 1.0,
-                "sleep_time_seconds": 1.0,
-            },
-            "acquisition": {
-                "sampling_rate_hz": sampling_rate_hz,
-                "clock_alignment": {
-                    "status": "COMPLETE",
-                    "classification_eligible": False,
-                    "uncertainty_seconds": 0.005,
-                    "fallback_reason": "CLOCK_UNCERTAINTY_EXCEEDED",
-                },
-            },
-            "measurement": {
-                "cycles": [
-                    {
-                        "start_event": {"aligned_elapsed_seconds": 1.2},
-                        "end_event": {"aligned_elapsed_seconds": 2.2},
-                    },
-                    {
-                        "start_event": {"aligned_elapsed_seconds": 3.3},
-                        "end_event": {"aligned_elapsed_seconds": 4.3},
-                    },
-                ]
-            },
-        }
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            directory = Path(temp_dir)
-            csv_path = directory / "synthetic.csv"
-            manifest_path = directory / "synthetic.json"
-            pd.DataFrame(
-                {
-                    "Sample": np.arange(sample_count),
-                    "Elapsed Time (s)": elapsed,
-                    POWER_COLUMN: power,
-                }
-            ).to_csv(csv_path, index=False)
-            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-
-            aligned = process_measurement(csv_path)
-            manifest["acquisition"]["clock_alignment"][
-                "uncertainty_seconds"
-            ] = 0.00501
-            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-            fallback = process_measurement(csv_path)
-
-        self.assertEqual(
-            aligned.summary["active_classification_source"],
-            "synchronized manifest elapsed time",
-        )
-        self.assertEqual(aligned.summary["active_region_count"], 2)
-        self.assertIsNone(aligned.summary["clock_alignment_fallback_reason"])
-        self.assertEqual(
-            fallback.summary["active_classification_source"],
-            "signal hysteresis (Otsu fallback)",
-        )
-        self.assertEqual(
-            fallback.summary["clock_alignment_fallback_reason"],
-            "CLOCK_UNCERTAINTY_EXCEEDED",
-        )
-
-    def test_final_safety_margin_idle_and_actual_time_deltas_drive_energy(self):
-        elapsed = np.array([0.0, 0.1, 0.2, 0.4, 0.7, 0.8, 0.9, 1.0])
-        power = np.array([0.5, 0.5, 2.0, 2.0, 2.0, 1.0, 1.0, 1.0])
-        manifest = {
-            "schema_version": 2,
-            "input_batch_size": 4,
-            "workload_policy": {},
-            "plan": {
-                "inferences_per_cycle": 10,
-                "number_of_cycles": 1,
-                "leading_idle_seconds": 0.0,
+                "inferences_per_cycle": inferences_per_cycle,
                 "sleep_time_seconds": 0.0,
                 "safety_margin_seconds": 0.2,
             },
@@ -221,25 +29,50 @@ class CleanDataProcessingTests(unittest.TestCase):
                 "sampling_rate_hz": 10.0,
                 "clock_alignment": {
                     "status": "COMPLETE",
-                    "classification_eligible": True,
                     "uncertainty_seconds": 0.001,
-                    "fallback_reason": None,
                 },
             },
             "measurement": {
                 "cycles": [
                     {
                         "start_event": {"aligned_elapsed_seconds": 0.2},
-                        "end_event": {"aligned_elapsed_seconds": 0.7},
+                        "end_event": {"aligned_elapsed_seconds": 1.1},
+                    }
+                ]
+            },
+        }
+
+    def test_boundary_outliers_shrink_region_and_inference_count(self):
+        elapsed = np.arange(13) / 10.0
+        power = np.array(
+            [1.0, 10.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 0.0, 1.0, 1.0]
+        )
+        manifest = {
+            "schema_version": 2,
+            "plan": {
+                "inferences_per_cycle": 100,
+                "sleep_time_seconds": 0.0,
+                "safety_margin_seconds": 0.2,
+            },
+            "acquisition": {
+                "sampling_rate_hz": 10.0,
+                "clock_alignment": {
+                    "status": "COMPLETE",
+                    "uncertainty_seconds": 0.001,
+                },
+            },
+            "measurement": {
+                "cycles": [
+                    {
+                        "start_event": {"aligned_elapsed_seconds": 0.1},
+                        "end_event": {"aligned_elapsed_seconds": 1.0},
                     }
                 ]
             },
         }
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            directory = Path(temp_dir)
-            csv_path = directory / "synthetic.csv"
-            manifest_path = directory / "synthetic.json"
+            csv_path = Path(temp_dir) / "synthetic.csv"
             pd.DataFrame(
                 {
                     "Sample": np.arange(len(elapsed)),
@@ -247,36 +80,235 @@ class CleanDataProcessingTests(unittest.TestCase):
                     POWER_COLUMN: power,
                 }
             ).to_csv(csv_path, index=False)
-            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            csv_path.with_suffix(".json").write_text(
+                json.dumps(manifest), encoding="utf-8"
+            )
+
+            result = process_measurement(
+                csv_path,
+                config=ProcessingConfig(tail_trim_fraction=0.1),
+            )
+
+        region = result.regions.iloc[0]
+        self.assertEqual(result.summary["outlier_count"], 2)
+        self.assertEqual(region["discarded_leading_sample_count"], 1)
+        self.assertEqual(region["discarded_trailing_sample_count"], 1)
+        self.assertEqual(region["discarded_interior_sample_count"], 0)
+        self.assertAlmostEqual(region["original_start_time_s"], 0.1)
+        self.assertAlmostEqual(region["original_end_time_s"], 1.0)
+        self.assertAlmostEqual(region["start_time_s"], 0.2)
+        self.assertAlmostEqual(region["end_time_s"], 0.9)
+        self.assertAlmostEqual(region["duration_s"], 0.8)
+        self.assertAlmostEqual(region["effective_inference_count"], 80.0)
+        self.assertAlmostEqual(region["discarded_inference_count"], 20.0)
+        self.assertAlmostEqual(
+            region["energy_per_inference_J"], 3.6 / 80.0
+        )
+
+    def test_manifest_batch_size_scales_input_statistics_and_energy(self):
+        elapsed = np.arange(13) / 10.0
+        power = np.array(
+            [1.0, 10.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 0.0, 1.0, 1.0]
+        )
+        manifest = self._aligned_manifest()
+        manifest["input_batch_size"] = 4
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            csv_path = Path(temp_dir) / "synthetic.csv"
+            pd.DataFrame(
+                {
+                    "Sample": np.arange(len(elapsed)),
+                    "Elapsed Time (s)": elapsed,
+                    POWER_COLUMN: power,
+                }
+            ).to_csv(csv_path, index=False)
+            csv_path.with_suffix(".json").write_text(
+                json.dumps(manifest), encoding="utf-8"
+            )
+
+            result = process_measurement(
+                csv_path,
+                config=ProcessingConfig(tail_trim_fraction=0.1),
+            )
+
+        region = result.regions.iloc[0]
+        self.assertEqual(result.summary["input_batch_size"], 4.0)
+        self.assertEqual(result.summary["input_samples_per_cycle"], 400.0)
+        self.assertAlmostEqual(region["inferences_per_original_sample"], 40.0)
+        self.assertAlmostEqual(region["effective_inference_count"], 320.0)
+        self.assertAlmostEqual(region["discarded_inference_count"], 80.0)
+        self.assertAlmostEqual(
+            region["energy_per_inference_J"],
+            region["energy_per_cycle_J"] / 320.0,
+        )
+
+    def test_interior_outliers_are_skipped_without_bridging_the_gap(self):
+        elapsed = np.arange(8) / 10.0
+        power = np.array([1.0, 2.0, 10.0, 3.0, 0.0, 4.0, 1.0, 1.0])
+        manifest = {
+            "schema_version": 2,
+            "plan": {
+                "inferences_per_cycle": 100,
+                "sleep_time_seconds": 0.0,
+                "safety_margin_seconds": 0.1,
+            },
+            "acquisition": {
+                "sampling_rate_hz": 10.0,
+                "clock_alignment": {
+                    "status": "COMPLETE",
+                    "uncertainty_seconds": 0.001,
+                },
+            },
+            "measurement": {
+                "cycles": [
+                    {
+                        "start_event": {"aligned_elapsed_seconds": 0.1},
+                        "end_event": {"aligned_elapsed_seconds": 0.5},
+                    }
+                ]
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            csv_path = Path(temp_dir) / "synthetic.csv"
+            pd.DataFrame(
+                {
+                    "Sample": np.arange(len(elapsed)),
+                    "Elapsed Time (s)": elapsed,
+                    POWER_COLUMN: power,
+                }
+            ).to_csv(csv_path, index=False)
+            csv_path.with_suffix(".json").write_text(
+                json.dumps(manifest), encoding="utf-8"
+            )
+
+            result = process_measurement(
+                csv_path,
+                config=ProcessingConfig(tail_trim_fraction=0.2),
+            )
+
+        region = result.regions.iloc[0]
+        self.assertEqual(region["discarded_interior_sample_count"], 2)
+        self.assertEqual(region["discarded_leading_sample_count"], 0)
+        self.assertEqual(region["discarded_trailing_sample_count"], 0)
+        self.assertAlmostEqual(region["duration_s"], 0.2)
+        self.assertAlmostEqual(region["energy_per_cycle_J"], 0.4)
+        self.assertAlmostEqual(region["effective_inference_count"], 60.0)
+        self.assertAlmostEqual(
+            region["energy_per_inference_J"], 0.4 / 60.0
+        )
+
+    def test_initial_time_trim_is_controlled_by_flag(self):
+        elapsed = np.arange(8) / 10.0
+        power = np.array([1.0, 2.0, 10.0, 3.0, 0.0, 4.0, 1.0, 1.0])
+        manifest = {
+            "schema_version": 2,
+            "plan": {
+                "inferences_per_cycle": 100,
+                "sleep_time_seconds": 0.0,
+                "safety_margin_seconds": 0.1,
+            },
+            "acquisition": {
+                "sampling_rate_hz": 10.0,
+                "clock_alignment": {
+                    "status": "COMPLETE",
+                    "uncertainty_seconds": 0.001,
+                },
+            },
+            "measurement": {
+                "cycles": [
+                    {
+                        "start_event": {"aligned_elapsed_seconds": 0.1},
+                        "end_event": {"aligned_elapsed_seconds": 0.5},
+                    }
+                ]
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            csv_path = Path(temp_dir) / "synthetic.csv"
+            pd.DataFrame(
+                {
+                    "Sample": np.arange(len(elapsed)),
+                    "Elapsed Time (s)": elapsed,
+                    POWER_COLUMN: power,
+                }
+            ).to_csv(csv_path, index=False)
+            csv_path.with_suffix(".json").write_text(
+                json.dumps(manifest), encoding="utf-8"
+            )
+
+            without_initial_trim = process_measurement(
+                csv_path,
+                config=ProcessingConfig(
+                    tail_trim_fraction=0.2,
+                    discard_initial_samples=False,
+                    initial_trim_fraction=0.2,
+                ),
+            )
+            with_initial_trim = process_measurement(
+                csv_path,
+                config=ProcessingConfig(
+                    tail_trim_fraction=0.2,
+                    discard_initial_samples=True,
+                    initial_trim_fraction=0.2,
+                ),
+            )
+
+        without_region = without_initial_trim.regions.iloc[0]
+        with_region = with_initial_trim.regions.iloc[0]
+        self.assertEqual(without_region["discarded_initial_sample_count"], 0)
+        self.assertAlmostEqual(without_region["start_time_s"], 0.1)
+        self.assertEqual(with_region["discarded_initial_sample_count"], 1)
+        self.assertAlmostEqual(with_region["start_time_s"], 0.3)
+        self.assertAlmostEqual(with_region["effective_inference_count"], 40.0)
+
+    def test_trimming_is_skipped_below_minimum_inference_count(self):
+        elapsed = np.arange(13) / 10.0
+        power = np.array(
+            [1.0, 10.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 0.0, 1.0, 1.0]
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            csv_path = Path(temp_dir) / "synthetic.csv"
+            pd.DataFrame(
+                {
+                    "Sample": np.arange(len(elapsed)),
+                    "Elapsed Time (s)": elapsed,
+                    POWER_COLUMN: power,
+                }
+            ).to_csv(csv_path, index=False)
+            csv_path.with_suffix(".json").write_text(
+                json.dumps(self._aligned_manifest(inferences_per_cycle=5)),
+                encoding="utf-8",
+            )
 
             result = process_measurement(
                 csv_path,
                 config=ProcessingConfig(
-                    hampel_window_seconds=0.01,
-                    smoothing_window_seconds=0.01,
+                    tail_trim_fraction=0.1,
+                    discard_initial_samples=True,
+                    initial_trim_fraction=0.2,
                 ),
             )
 
-        region = result.regions.iloc[0]
-        baseline = result.summary["idle_baseline"]
-        self.assertEqual(baseline["source"], "final measured safety margin")
-        self.assertEqual(baseline["sample_count"], 3)
-        self.assertAlmostEqual(baseline["power_median_W"], 1.0)
-        self.assertAlmostEqual(region["duration_s"], 0.5)
-        self.assertAlmostEqual(region["power_offset_W"], 1.0)
-        self.assertAlmostEqual(region["energy_per_cycle_J"], 0.5)
-        self.assertAlmostEqual(region["energy_per_inference_J"], 0.0125)
+        self.assertFalse(result.summary["trimming_enabled"])
+        self.assertEqual(
+            result.summary["trimming_skip_reason"],
+            "TRIMMING_SKIPPED_TOO_FEW_INFERENCES",
+        )
+        self.assertEqual(result.summary["outlier_count"], 0)
+        self.assertEqual(result.regions.iloc[0]["retained_sample_count"], 10)
 
-    def test_missing_safety_margin_uses_idle_fallback_without_discarding(self):
-        sampling_rate_hz = 20.0
-        elapsed = np.arange(40) / sampling_rate_hz
-        power = np.full(40, 0.5)
-        power[10:21] = 1.5
+    def test_optional_filters_run_after_discarding_extreme_samples(self):
+        elapsed = np.arange(15) / 10.0
+        power = np.array(
+            [1.0, 1.0, 2.0, 100.0, 2.0, 2.0, 20.0, 2.0, 2.0,
+             2.0, 0.0, 2.0, 1.0, 1.0, 1.0]
+        )
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            directory = Path(temp_dir)
-            csv_path = directory / "synthetic.csv"
-            manifest_path = directory / "synthetic.json"
+            csv_path = Path(temp_dir) / "synthetic.csv"
             pd.DataFrame(
                 {
                     "Sample": np.arange(len(elapsed)),
@@ -284,35 +316,79 @@ class CleanDataProcessingTests(unittest.TestCase):
                     POWER_COLUMN: power,
                 }
             ).to_csv(csv_path, index=False)
-            manifest_path.write_text(
-                json.dumps(
-                    {
-                        "schema_version": 1,
-                        "plan": {"inferences_per_cycle": 10},
-                        "acquisition": {
-                            "sampling_rate_hz": sampling_rate_hz
-                        },
-                    }
-                ),
+            csv_path.with_suffix(".json").write_text(
+                json.dumps(self._aligned_manifest()),
                 encoding="utf-8",
             )
 
-            result = process_measurement(csv_path)
+            unfiltered = process_measurement(
+                csv_path,
+                config=ProcessingConfig(tail_trim_fraction=0.1),
+            )
+            filtered = process_measurement(
+                csv_path,
+                config=ProcessingConfig(
+                    tail_trim_fraction=0.1,
+                    filter_after_discard=True,
+                    hampel_window_seconds=0.3,
+                    rolling_window_seconds=0.3,
+                ),
+            )
 
-        self.assertEqual(len(result.regions), 1)
-        self.assertTrue(np.isfinite(result.regions.iloc[0]["energy_per_cycle_J"]))
-        self.assertAlmostEqual(
-            result.regions.iloc[0]["energy_per_inference_J"],
-            result.regions.iloc[0]["energy_per_cycle_J"] / 10,
+        self.assertEqual(unfiltered.samples.loc[6, "power_clean_W"], 20.0)
+        self.assertFalse(unfiltered.summary["filter_after_discard"])
+        self.assertEqual(filtered.summary["outlier_count"], 2)
+        self.assertEqual(filtered.summary["hampel_outlier_count"], 1)
+        self.assertTrue(filtered.summary["filter_after_discard"])
+        self.assertTrue(filtered.samples.loc[3, "is_power_outlier"])
+        self.assertTrue(filtered.samples.loc[10, "is_power_outlier"])
+        self.assertTrue(filtered.samples.loc[6, "is_hampel_outlier"])
+        self.assertTrue(np.isnan(filtered.samples.loc[3, "power_clean_W"]))
+        self.assertAlmostEqual(filtered.samples.loc[6, "power_clean_W"], 2.0)
+        self.assertAlmostEqual(filtered.samples.loc[3, "power_smoothed_W"], 2.0)
+        self.assertAlmostEqual(filtered.samples.loc[6, "power_smoothed_W"], 2.0)
+        self.assertLess(
+            filtered.regions.iloc[0]["energy_per_cycle_J"],
+            unfiltered.regions.iloc[0]["energy_per_cycle_J"],
         )
-        self.assertEqual(
-            result.summary["idle_baseline"]["source"],
-            "classified idle fallback",
+
+    def test_filter_after_discard_cli_flag_is_optional(self):
+        parser = build_parser()
+        disabled = parser.parse_args(["capture.csv"])
+        enabled = parser.parse_args(
+            ["capture.csv", "--filter-after-discard"]
         )
-        self.assertEqual(
-            result.summary["idle_baseline"]["fallback_reason"],
-            "SAFETY_MARGIN_UNAVAILABLE",
+
+        self.assertFalse(disabled.filter_after_discard)
+        self.assertTrue(enabled.filter_after_discard)
+
+    def test_batch_processor_forwards_hybrid_filter_options(self):
+        args = process_and_visualize.build_parser().parse_args(
+            [
+                "--frequency", "100",
+                "--tail-trim-percentage", "2.5",
+                "--discard-initial-samples",
+                "--initial-trim-percentage", "4",
+                "--filter-after-discard",
+                "--hampel-window-seconds", "0.31",
+                "--hampel-sigma", "3.5",
+                "--rolling-window-seconds", "0.11",
+                "--max-clock-uncertainty-fraction", "0.25",
+            ]
         )
+
+        config = process_and_visualize._processing_config(args)
+
+        self.assertEqual(config.sampling_rate_hz, 100.0)
+        self.assertEqual(config.tail_trim_fraction, 0.025)
+        self.assertTrue(config.discard_initial_samples)
+        self.assertEqual(config.initial_trim_fraction, 0.04)
+        self.assertEqual(config.min_inferences_for_trimming, 10)
+        self.assertTrue(config.filter_after_discard)
+        self.assertEqual(config.hampel_window_seconds, 0.31)
+        self.assertEqual(config.hampel_sigma, 3.5)
+        self.assertEqual(config.rolling_window_seconds, 0.11)
+        self.assertEqual(config.max_clock_uncertainty_fraction, 0.25)
 
 
 if __name__ == "__main__":
