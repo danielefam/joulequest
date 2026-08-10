@@ -11,7 +11,7 @@ import pandas as pd
 try:
     from . import data_processing as dp
 except ImportError:
-    import processing_report.data_processing as dp
+    import data_processing as dp
 
 try:
     from .artifact_paths import get_manifest_file_path, load_measurement_metadata
@@ -31,13 +31,13 @@ def build_parser():
     parser.add_argument(
         "--data-dir",
         type=Path,
-        default=REPOSITORY_ROOT / "measurements" / "runs" / "pi5",
+        default=REPOSITORY_ROOT / "measurements" / "runs" / "nano_base",
         help="Directory containing measurement CSV files.",
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=REPOSITORY_ROOT / "measurements" / "Plot" / "pi5",
+        default=REPOSITORY_ROOT / "measurements" / "Plot" / "nano_base",
         help="Directory receiving the summary CSV.",
     )
     parser.add_argument(
