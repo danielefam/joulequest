@@ -22,8 +22,12 @@ LINEAR_MODEL_DIRECTORY="${LINEAR_MODEL_DIRECTORY:-${MODEL_ROOT}/Linear}"
 CONV_MODEL_DIRECTORY="${CONV_MODEL_DIRECTORY:-${MODEL_ROOT}/Conv}"
 LENET_MODEL_DIRECTORY="${LENET_MODEL_DIRECTORY:-${MODEL_ROOT}/Lenet}"
 LENET_MODEL_PATH="${LENET_MODEL_PATH:-${LENET_MODEL_DIRECTORY}/Lenet${MODEL_SUFFIX}}"
+POOL_MODEL_DIRECTORY="${POOL_MODEL_DIRECTORY:-${MODEL_ROOT}/Pool}"
+RELU_MODEL_DIRECTORY="${RELU_MODEL_DIRECTORY:-${MODEL_ROOT}/ReLU}"
+FLATTEN_MODEL_DIRECTORY="${FLATTEN_MODEL_DIRECTORY:-${MODEL_ROOT}/Flatten}"
 
 NUMBER_OF_CYCLES="${NUMBER_OF_CYCLES:-100}"
+BATCH_SIZE="${BATCH_SIZE:-1}"
 SLEEP_TIME="${SLEEP_TIME:-3}"
 TARGET_BURST_SECONDS="${TARGET_BURST_SECONDS:-0}"
 SAMPLING_RATE_HZ="${SAMPLING_RATE_HZ:-100}"
@@ -62,6 +66,23 @@ CONV_INPUT_CHANNELS="${CONV_INPUT_CHANNELS:-1 2 4 8 16 32 64 128 256 512}"
 CONV_IMAGE_SIZES="${CONV_IMAGE_SIZES:-32 64 128 256 512 1024}"
 CONV_KERNEL_PADDING="${CONV_KERNEL_PADDING:-3:0 3:1 5:0 5:1}"
 
+# Ordered standalone operations in TorchRunner's LeNet definition. The first
+# dimension of ReLU and Flatten models is the batch dimension and is replaced
+# by BATCH_SIZE by the runner.
+LENET_COMPONENT_MODELS=(
+    "${CONV_MODEL_DIRECTORY}/Conv_1_32_5_0_8${MODEL_SUFFIX}"
+    "${POOL_MODEL_DIRECTORY}/MaxPool_8_28_2${MODEL_SUFFIX}"
+    "${RELU_MODEL_DIRECTORY}/ReLU_1_8_14_14${MODEL_SUFFIX}"
+    "${CONV_MODEL_DIRECTORY}/Conv_8_14_5_0_32${MODEL_SUFFIX}"
+    "${POOL_MODEL_DIRECTORY}/MaxPool_32_10_2${MODEL_SUFFIX}"
+    "${POOL_MODEL_DIRECTORY}/AdaPool_32_5_4${MODEL_SUFFIX}"
+    "${RELU_MODEL_DIRECTORY}/ReLU_1_32_4_4${MODEL_SUFFIX}"
+    "${FLATTEN_MODEL_DIRECTORY}/Flatten_1_32_4_4${MODEL_SUFFIX}"
+    "${LINEAR_MODEL_DIRECTORY}/Linear_512_128${MODEL_SUFFIX}"
+    "${RELU_MODEL_DIRECTORY}/ReLU_1_128${MODEL_SUFFIX}"
+    "${LINEAR_MODEL_DIRECTORY}/Linear_128_64${MODEL_SUFFIX}"
+)
+
 # Set REPEAT_COMPLETED=1 to rerun models that already have a COMPLETE manifest
 # in this board's output directory. Set CONTINUE_ON_ERROR=1 to keep scheduling
 # after an experiment fails.
@@ -75,7 +96,8 @@ Usage:
 
 Options:
   --board LABEL       Safe label used only for the local result directory.
-    --suite SUITE       linear, conv, lenet, or all (default: all).
+    --suite SUITE       linear, conv, lenet, or all (default: all). The lenet
+                                            suite includes LeNet and every operation in its graph.
   --dry-run           Print commands without running measurements.
   --continue-on-error Continue after an experiment exits nonzero.
   --repeat-completed  Rerun experiments with an existing COMPLETE manifest.
@@ -92,7 +114,7 @@ Examples:
   ./run_measurement_campaign.sh --board pi5 --suite linear --dry-run
 
 Override parameters without editing the script:
-  BACKEND=cpu MAX_EXPECTED_CURRENT_A=3.0 \
+    BACKEND=cpu BATCH_SIZE=16 MAX_EXPECTED_CURRENT_A=3.0 \
     ./run_measurement_campaign.sh --board pi5 --suite all
 EOF
 }
@@ -192,6 +214,8 @@ done
     die "BACKEND must be cpu, cuda, or tpu"
 [[ "$NUMBER_OF_CYCLES" =~ ^[1-9][0-9]*$ ]] ||
     die "NUMBER_OF_CYCLES must be a positive integer"
+[[ "$BATCH_SIZE" =~ ^[1-9][0-9]*$ ]] ||
+    die "BATCH_SIZE must be a positive integer"
 [[ "$MIN_ACTIVE_SAMPLES" =~ ^[1-9][0-9]*$ ]] ||
     die "MIN_ACTIVE_SAMPLES must be a positive integer"
 [[ "$WARMUP_INFERENCES" =~ ^[0-9]+$ ]] ||
@@ -287,6 +311,7 @@ COMMON_ARGS=(
     --output-directory "$OUTPUT_DIRECTORY"
     --shunt-ohms "$SHUNT_OHMS"
     --max-expected-current-a "$MAX_EXPECTED_CURRENT_A"
+    --batch-size "$BATCH_SIZE"
     --number_of_cycles "$NUMBER_OF_CYCLES"
     --sleep_time "$SLEEP_TIME"
     --target_burst_seconds "$TARGET_BURST_SECONDS"
@@ -330,8 +355,8 @@ fi
 if [[ "$SUITE" == "conv" || "$SUITE" == "all" ]]; then
     conv_total=$((${#CONV_INPUT_CHANNEL_LIST[@]} * ${#CONV_IMAGE_SIZE_LIST[@]} * ${#CONV_KERNEL_PADDING_LIST[@]}))
 fi
-if [[ "$SUITE" == "lenet" ]]; then
-    lenet_total=1
+if [[ "$SUITE" == "lenet" || "$SUITE" == "all" ]]; then
+    lenet_total=$((1 + ${#LENET_COMPONENT_MODELS[@]}))
 fi
 total=$((linear_total + conv_total + lenet_total))
 
@@ -458,8 +483,11 @@ if [[ "$SUITE" == "conv" || "$SUITE" == "all" ]]; then
     done
 fi
 
-if [[ "$SUITE" == "lenet" ]]; then
+if [[ "$SUITE" == "lenet" || "$SUITE" == "all" ]]; then
     run_experiment "$LENET_MODEL_PATH"
+    for model_path in "${LENET_COMPONENT_MODELS[@]}"; do
+        run_experiment "$model_path"
+    done
 fi
 
 printf '\nCampaign finished for board %s.\n' "$BOARD_LABEL"
