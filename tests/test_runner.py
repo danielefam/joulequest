@@ -97,8 +97,8 @@ class TorchRunnerLegacyCompatibilityTests(unittest.TestCase):
             (
                 "GELU_16_1_32.pt",
                 {"type": "gelu", "input_shape": (16, 1, 32)},
-                (16, 1, 32),
-                (16, 1, 32),
+                (1, 1, 32),
+                (1, 1, 32),
             ),
             (
                 "SiLU_1_8_8_8.pt",
@@ -137,6 +137,18 @@ class TorchRunnerLegacyCompatibilityTests(unittest.TestCase):
     def test_activation_dimensions_must_be_positive(self):
         with self.assertRaisesRegex(ValueError, "positive input dimensions"):
             self.build_runner("ReLU_1_0_8_8.pt")
+
+    def test_batch_size_replaces_the_model_input_batch_dimension(self):
+        linear = TorchRunner("models/Linear_8_4.pt", batch_size=4)
+        attention = TorchRunner("models/Attention_5_8_2.pt", batch_size=3)
+
+        linear.generate_input()
+        attention.generate_input()
+
+        self.assertEqual(tuple(linear.input_data.shape), (4, 8))
+        self.assertEqual(tuple(attention.input_data.shape), (5, 3, 8))
+        self.assertEqual(linear.input_batch_size, 4)
+        self.assertEqual(attention.input_batch_size, 3)
 
 
 if __name__ == "__main__":

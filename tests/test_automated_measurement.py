@@ -705,6 +705,7 @@ class ArgumentParserTests(unittest.TestCase):
         ])
 
         self.assertEqual(args.number_of_cycles, 100)
+        self.assertEqual(args.batch_size, 1)
         self.assertEqual(args.sleep_time, 3.0)
         self.assertEqual(args.target_burst_seconds, 0.0)
         self.assertEqual(args.sampling_rate_hz, 100.0)

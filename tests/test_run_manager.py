@@ -24,9 +24,10 @@ class FakeRunner:
 
     instances = []
 
-    def __init__(self, model_path, device):
+    def __init__(self, model_path, device, batch_size=1):
         self.model_path = model_path
         self.device = device
+        self.input_batch_size = batch_size
         self.prepared = False
         self.closed = False
         self.calls = []
@@ -130,8 +131,8 @@ class FinalCountRegimeShiftRunner(FakeRunner):
 
 
 class FailingMeasuredRunner(FakeRunner):
-    def __init__(self, model_path, device):
-        super().__init__(model_path, device)
+    def __init__(self, model_path, device, batch_size=1):
+        super().__init__(model_path, device, batch_size=batch_size)
         self.measured_calls = 0
 
     def run_prepared_burst(self, inference_count):
@@ -433,6 +434,7 @@ class StdioAcquisitionControllerTests(unittest.TestCase):
             model="Linear_64_64.pt",
             number_of_cycles=1,
             sleep_time=0.0,
+            batch_size=1,
             inferences_per_cycle=None,
             target_burst_seconds=1.0,
             sampling_rate_hz=10.0,
@@ -535,6 +537,7 @@ class RunManagerTests(unittest.TestCase):
             self.assertEqual(manifest["status"], "COMPLETE")
             self.assertEqual(manifest["schema_version"], 2)
             self.assertEqual(manifest["input_batch_size"], 1)
+            self.assertIn("_bs1_", manifest["campaign_id"])
             self.assertEqual(manifest["warmup"]["executed_inferences"], 5)
             self.assertEqual(manifest["calibration"]["discarded_batches"], 1)
             self.assertEqual(manifest["plan"]["inferences_per_cycle"], 120)
@@ -567,6 +570,15 @@ class RunManagerTests(unittest.TestCase):
             self.assertTrue(manifest_path.exists())
             persisted = json.loads(manifest_path.read_text(encoding="utf-8"))
             self.assertEqual(persisted["campaign_id"], manifest["campaign_id"])
+
+    def test_batch_size_is_passed_to_runner_and_recorded_in_campaign_id(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manifest = self._manager(temp_dir, batch_size=4).execute()
+
+        runner = FakeRunner.instances[-1]
+        self.assertEqual(runner.input_batch_size, 4)
+        self.assertEqual(manifest["input_batch_size"], 4)
+        self.assertIn("_bs4_", manifest["campaign_id"])
 
     def test_calibration_resizes_batch_after_pilot_regime_shift(self):
         with tempfile.TemporaryDirectory() as temp_dir:

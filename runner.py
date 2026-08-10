@@ -31,8 +31,13 @@ if _tf_available:
         development and validation prioritize the PyTorch CPU/CUDA path.
         """
 
-        def __init__(self, model_path, device="tpu"):
+        def __init__(self, model_path, device="tpu", batch_size=1):
             super().__init__(model_path, device=device)
+            if isinstance(batch_size, bool) or not isinstance(batch_size, int):
+                raise ValueError("batch_size must be a positive integer")
+            if batch_size <= 0:
+                raise ValueError("batch_size must be a positive integer")
+            self.batch_size = batch_size
             self._load_model()
 
         def _load_model(self):
@@ -44,6 +49,14 @@ if _tf_available:
             )
             self.interpreter.allocate_tensors()
             self.input_details = self.interpreter.get_input_details()
+            input_shape = self.input_details[0]["shape"].copy()
+            if input_shape[0] != self.batch_size:
+                input_shape[0] = self.batch_size
+                self.interpreter.resize_tensor_input(
+                    self.input_details[0]["index"], input_shape, strict=False
+                )
+                self.interpreter.allocate_tensors()
+                self.input_details = self.interpreter.get_input_details()
             self.output_details = self.interpreter.get_output_details()
 
         def generate_input(self):
@@ -70,7 +83,7 @@ if _tf_available:
 
         @property
         def input_batch_size(self):
-            return int(self.input_details[0]["shape"][0])
+            return self.batch_size
 
 if _torch_available:
     torch = importlib.import_module("torch")
@@ -286,10 +299,21 @@ if _torch_available:
     class TorchRunner(InferenceRunner):
         """PyTorch runner"""
 
-        def __init__(self, model_path, device="cpu", from_state_dict=False):
+        def __init__(
+            self,
+            model_path,
+            device="cpu",
+            from_state_dict=False,
+            batch_size=1,
+        ):
             super().__init__(model_path, device=device)
+            if isinstance(batch_size, bool) or not isinstance(batch_size, int):
+                raise ValueError("batch_size must be a positive integer")
+            if batch_size <= 0:
+                raise ValueError("batch_size must be a positive integer")
             self.device = torch.device(device)
             self.from_state_dict = from_state_dict
+            self.batch_size = batch_size
             self._load_model()
 
         def _load_model(self):
@@ -351,7 +375,9 @@ if _torch_available:
             """Generate a random input for the next burst."""
             with torch.inference_mode():
                 definition = TORCH_LAYER_DEFINITIONS[self.params["type"]]
-                shape = definition.input_shape(self.params)
+                shape = list(definition.input_shape(self.params))
+                batch_axis = 1 if self.params["type"] == "attention" else 0
+                shape[batch_axis] = self.batch_size
                 self.input_data = torch.randn(
                     *shape,
                     dtype=torch.float32,
@@ -360,9 +386,5 @@ if _torch_available:
 
         @property
         def input_batch_size(self):
-            shape = TORCH_LAYER_DEFINITIONS[self.params["type"]].input_shape(
-                self.params
-            )
-            batch_axis = 1 if self.params["type"] == "attention" else 0
-            return int(shape[batch_axis])
+            return self.batch_size
                 

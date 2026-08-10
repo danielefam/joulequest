@@ -97,7 +97,7 @@ It runs the test in three steps:
 A simple CUDA example is:
 
 ```bash
-python run_manager.py --backend cuda --model Models/CUDA/Linear/Linear_64_64.pt --wait_for_acquisition
+python run_manager.py --backend cuda --model Models/CUDA/Linear/Linear_64_64.pt --batch-size 1 --wait_for_acquisition
 ```
 
 Use a model file that exists on your computer. The model name tells the program its shape. For example, `Linear_64_64.pt` means a linear layer with 64 inputs and 64 outputs.
@@ -127,6 +127,7 @@ These are the most useful settings:
 | Setting                         | Meaning                                                  | Default                     |
 | ------------------------------- | -------------------------------------------------------- | --------------------------- |
 | `--number_of_cycles`          | Number of real measurement cycles                        | `5`                       |
+| `--batch-size`                | Input samples processed by each model forward pass       | `1`                       |
 | `--sleep_time`                | Pause, in seconds, between cycles                        | `10`                      |
 | `--target_burst_seconds`      | Desired duration, in seconds, of each real cycle         | `10`                      |
 | `--sampling_rate_hz`          | INA226 samples per second                                | `10`                      |
