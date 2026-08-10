@@ -38,6 +38,11 @@ class InferenceRunner(ABC):
         """Execute exactly ``inferences_per_cycle`` forward passes."""
         raise NotImplementedError
 
+    @property
+    def input_batch_size(self):
+        """Return the number of input samples processed by one forward pass."""
+        return 1
+
     def randomize_parameters(self):
         """Create a new parameter state before the next burst."""
 

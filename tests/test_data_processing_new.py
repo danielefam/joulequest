@@ -208,6 +208,7 @@ class CleanDataProcessingTests(unittest.TestCase):
         power = np.array([0.5, 0.5, 2.0, 2.0, 2.0, 1.0, 1.0, 1.0])
         manifest = {
             "schema_version": 2,
+            "input_batch_size": 4,
             "workload_policy": {},
             "plan": {
                 "inferences_per_cycle": 10,
@@ -264,7 +265,7 @@ class CleanDataProcessingTests(unittest.TestCase):
         self.assertAlmostEqual(region["duration_s"], 0.5)
         self.assertAlmostEqual(region["power_offset_W"], 1.0)
         self.assertAlmostEqual(region["energy_per_cycle_J"], 0.5)
-        self.assertAlmostEqual(region["energy_per_inference_J"], 0.05)
+        self.assertAlmostEqual(region["energy_per_inference_J"], 0.0125)
 
     def test_missing_safety_margin_uses_idle_fallback_without_discarding(self):
         sampling_rate_hz = 20.0
@@ -300,6 +301,10 @@ class CleanDataProcessingTests(unittest.TestCase):
 
         self.assertEqual(len(result.regions), 1)
         self.assertTrue(np.isfinite(result.regions.iloc[0]["energy_per_cycle_J"]))
+        self.assertAlmostEqual(
+            result.regions.iloc[0]["energy_per_inference_J"],
+            result.regions.iloc[0]["energy_per_cycle_J"] / 10,
+        )
         self.assertEqual(
             result.summary["idle_baseline"]["source"],
             "classified idle fallback",

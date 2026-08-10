@@ -120,6 +120,12 @@ class TorchRunnerLegacyCompatibilityTests(unittest.TestCase):
                 self.assertEqual(runner.params, expected_params)
                 runner.generate_input()
                 self.assertEqual(tuple(runner.input_data.shape), input_shape)
+                expected_batch_size = (
+                    input_shape[1]
+                    if expected_params["type"] == "attention"
+                    else input_shape[0]
+                )
+                self.assertEqual(runner.input_batch_size, expected_batch_size)
                 with torch.inference_mode():
                     output = runner.model(runner.input_data)
                 self.assertEqual(tuple(output.shape), output_shape)

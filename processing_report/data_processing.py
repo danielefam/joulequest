@@ -401,10 +401,17 @@ def _single_sample_duration(times, index, sampling_rate_hz):
 def _build_regions(samples, sampling_rate_hz, manifest):
     regions = []
     inferences_per_cycle = None
+    input_batch_size = 1
     if manifest is not None:
         inferences_per_cycle = manifest.get("plan", {}).get(
             "inferences_per_cycle"
         )
+        input_batch_size = manifest.get("input_batch_size", 1)
+    if isinstance(input_batch_size, bool) or not isinstance(
+        input_batch_size, (int, float)
+    ) or input_batch_size <= 0:
+        raise ValueError("Manifest input_batch_size must be a positive number")
+    input_batch_size = float(input_batch_size)
 
     idle_baseline, baseline_metadata = _idle_baseline(samples, manifest)
     for cycle, (start, end) in enumerate(
@@ -443,7 +450,9 @@ def _build_regions(samples, sampling_rate_hz, manifest):
                 "power_offset_W": offset_power,
                 "energy_per_cycle_J": energy,
                 "energy_per_inference_J": (
-                    energy / inferences_per_cycle if inferences_per_cycle else np.nan
+                    energy / (inferences_per_cycle * input_batch_size)
+                    if inferences_per_cycle
+                    else np.nan
                 ),
             }
         )

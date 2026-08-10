@@ -68,6 +68,10 @@ if _tf_available:
             for _ in range(inferences_per_cycle):
                 self.interpreter.invoke()
 
+        @property
+        def input_batch_size(self):
+            return int(self.input_details[0]["shape"][0])
+
 if _torch_available:
     torch = importlib.import_module("torch")
     nn = torch.nn
@@ -353,4 +357,12 @@ if _torch_available:
                     dtype=torch.float32,
                     device=self.device,
                 )
+
+        @property
+        def input_batch_size(self):
+            shape = TORCH_LAYER_DEFINITIONS[self.params["type"]].input_shape(
+                self.params
+            )
+            batch_axis = 1 if self.params["type"] == "attention" else 0
+            return int(shape[batch_axis])
                 

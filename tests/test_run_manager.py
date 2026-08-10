@@ -534,6 +534,7 @@ class RunManagerTests(unittest.TestCase):
             self.assertTrue(runner.closed)
             self.assertEqual(manifest["status"], "COMPLETE")
             self.assertEqual(manifest["schema_version"], 2)
+            self.assertEqual(manifest["input_batch_size"], 1)
             self.assertEqual(manifest["warmup"]["executed_inferences"], 5)
             self.assertEqual(manifest["calibration"]["discarded_batches"], 1)
             self.assertEqual(manifest["plan"]["inferences_per_cycle"], 120)

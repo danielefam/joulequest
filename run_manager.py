@@ -1211,6 +1211,15 @@ class RunManager:
             ],
         )
 
+    @staticmethod
+    def _input_batch_size(runner):
+        batch_size = getattr(runner, "input_batch_size", 1)
+        if isinstance(batch_size, bool) or not isinstance(batch_size, int):
+            raise ValueError("input_batch_size must be a positive integer")
+        if batch_size <= 0:
+            raise ValueError("input_batch_size must be a positive integer")
+        return batch_size
+
     def execute(self):
         """Execute one campaign and return its complete manifest dictionary."""
         campaign_id = self._new_campaign_id()
@@ -1236,6 +1245,7 @@ class RunManager:
         try:
             runner = self.runner_cls(self.model_path, self.backend)
             runner.prepare()
+            manifest["input_batch_size"] = self._input_batch_size(runner)
 
             plan = self._prepare_acquisition(runner, campaign_id, manifest)
             if self.acquisition_controller is not None:
