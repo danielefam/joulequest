@@ -355,6 +355,7 @@ class RunManager:
         number_of_cycles=5,
         sleep_time=10.0,
         backend="cuda",
+        batch_size=1,
         inferences_per_cycle=None,
         target_burst_seconds=10.0,
         sampling_rate_hz=10.0,
@@ -391,6 +392,7 @@ class RunManager:
         self.number_of_cycles = number_of_cycles
         self.sleep_time = sleep_time
         self.backend = backend
+        self.batch_size = batch_size
         self.inferences_per_cycle = inferences_per_cycle
         self.target_burst_seconds = target_burst_seconds
         self.sampling_rate_hz = sampling_rate_hz
@@ -438,6 +440,10 @@ class RunManager:
                 "calibration_repetitions must include one discarded and "
                 "at least one retained batch"
             )
+        if isinstance(self.batch_size, bool) or not isinstance(
+            self.batch_size, int
+        ) or self.batch_size <= 0:
+            raise ValueError("batch_size must be a positive integer")
         if self.calibration_target_seconds <= 0:
             raise ValueError("calibration_target_seconds must be positive")
         if self.calibration_sizing_max_attempts < 1:
@@ -488,7 +494,10 @@ class RunManager:
     def _new_campaign_id(self):
         model_stem = Path(self.model_path).stem.replace(" ", "-")
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        return f"{timestamp}_{model_stem}_{uuid.uuid4().hex[:8]}"
+        return (
+            f"{timestamp}_{model_stem}_bs{self.batch_size}_"
+            f"{uuid.uuid4().hex[:8]}"
+        )
 
     def _run_warmup(self, runner):
         """Discard cold-start work until both warm-up minima are satisfied."""
@@ -1211,6 +1220,15 @@ class RunManager:
             ],
         )
 
+    @staticmethod
+    def _input_batch_size(runner):
+        batch_size = getattr(runner, "input_batch_size", 1)
+        if isinstance(batch_size, bool) or not isinstance(batch_size, int):
+            raise ValueError("input_batch_size must be a positive integer")
+        if batch_size <= 0:
+            raise ValueError("input_batch_size must be a positive integer")
+        return batch_size
+
     def execute(self):
         """Execute one campaign and return its complete manifest dictionary."""
         campaign_id = self._new_campaign_id()
@@ -1234,8 +1252,13 @@ class RunManager:
         acquisition_stopped = False
 
         try:
-            runner = self.runner_cls(self.model_path, self.backend)
+            runner = self.runner_cls(
+                self.model_path,
+                self.backend,
+                batch_size=self.batch_size,
+            )
             runner.prepare()
+            manifest["input_batch_size"] = self._input_batch_size(runner)
 
             plan = self._prepare_acquisition(runner, campaign_id, manifest)
             if self.acquisition_controller is not None:
@@ -1318,6 +1341,7 @@ def build_argument_parser():
     )
     parser.add_argument("--backend", choices=["tpu", "cpu", "cuda"], required=True)
     parser.add_argument("--model", required=True)
+    parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--number_of_cycles", type=int, default=5)
     parser.add_argument("--sleep_time", type=float, default=10.0)
     parser.add_argument("--inferences_per_cycle", type=int, default=None)
@@ -1374,6 +1398,7 @@ def main():
         number_of_cycles=args.number_of_cycles,
         sleep_time=args.sleep_time,
         backend=args.backend,
+        batch_size=args.batch_size,
         inferences_per_cycle=args.inferences_per_cycle,
         target_burst_seconds=args.target_burst_seconds,
         sampling_rate_hz=args.sampling_rate_hz,

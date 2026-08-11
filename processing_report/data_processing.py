@@ -23,12 +23,17 @@ TIMESTAMP_COLUMN = "Timestamp UTC"
 
 @dataclass(frozen=True)
 class ProcessingConfig:
-    """Tunable durations are expressed in seconds, not sample counts."""
+    """Fractions are values from 0 to 1, while durations are in seconds."""
 
     sampling_rate_hz: float | None = None
+    tail_trim_fraction: float = 0.01
+    discard_initial_samples: bool = False
+    initial_trim_fraction: float = 0.01
+    min_inferences_for_trimming: int = 10
+    filter_after_discard: bool = False
     hampel_window_seconds: float = 0.21
     hampel_sigma: float = 4.5
-    smoothing_window_seconds: float = 0.09
+    rolling_window_seconds: float = 0.09
     minimum_active_seconds: float = 0.10
     minimum_idle_seconds: float = 0.05
     maximum_preparation_seconds: float = 2.0
@@ -38,7 +43,7 @@ class ProcessingConfig:
         positive_values = {
             "hampel_window_seconds": self.hampel_window_seconds,
             "hampel_sigma": self.hampel_sigma,
-            "smoothing_window_seconds": self.smoothing_window_seconds,
+            "rolling_window_seconds": self.rolling_window_seconds,
             "minimum_active_seconds": self.minimum_active_seconds,
             "minimum_idle_seconds": self.minimum_idle_seconds,
             "maximum_preparation_seconds": self.maximum_preparation_seconds,
@@ -54,6 +59,12 @@ class ProcessingConfig:
                 "Configuration values must be positive: "
                 + ", ".join(invalid)
             )
+        if not 0 <= self.tail_trim_fraction < 0.5:
+            raise ValueError("tail_trim_fraction must be in [0, 0.5)")
+        if not 0 <= self.initial_trim_fraction < 1:
+            raise ValueError("initial_trim_fraction must be in [0, 1)")
+        if self.min_inferences_for_trimming < 1:
+            raise ValueError("min_inferences_for_trimming must be positive")
 
 
 @dataclass
@@ -344,7 +355,11 @@ def _idle_baseline(samples, manifest):
     except (TypeError, ValueError):
         safety_margin_seconds = None
 
-    if safety_margin_seconds is not None and safety_margin_seconds > 0:
+    candidates = pd.Series(dtype=float)
+    source = "final measured safety margin"
+    if safety_margin_seconds is None or safety_margin_seconds <= 0:
+        fallback_reason = "SAFETY_MARGIN_UNAVAILABLE"
+    else:
         window_start = float(times.iloc[-1] - safety_margin_seconds)
         candidates = samples.loc[
             (times >= window_start) & (samples["phase"] == "idle"),
@@ -352,16 +367,12 @@ def _idle_baseline(samples, manifest):
         ]
         if len(candidates) < 2:
             fallback_reason = "SAFETY_MARGIN_IDLE_SAMPLES_INSUFFICIENT"
-    else:
-        fallback_reason = "SAFETY_MARGIN_UNAVAILABLE"
 
     if fallback_reason is not None:
         source = "classified idle fallback"
         candidates = samples.loc[
             samples["phase"] == "idle", "power_clean_W"
         ]
-    else:
-        source = "final measured safety margin"
 
     if candidates.empty:
         return np.nan, {
@@ -388,65 +399,196 @@ def _idle_baseline(samples, manifest):
     }
 
 
-def _single_sample_duration(times, index, sampling_rate_hz):
+def _sample_durations(times, sampling_rate_hz):
     if len(times) == 1:
-        return 1.0 / sampling_rate_hz
-    if index == 0:
-        return float(times.iloc[1] - times.iloc[0])
-    if index == len(times) - 1:
-        return float(times.iloc[-1] - times.iloc[-2])
-    return float((times.iloc[index + 1] - times.iloc[index - 1]) / 2.0)
+        return np.array([1.0 / sampling_rate_hz])
+    values = times.to_numpy(dtype=float)
+    deltas = np.diff(values)
+    if np.any(deltas <= 0):
+        raise ValueError("Elapsed Time (s) must be strictly increasing")
+    durations = np.empty(len(values), dtype=float)
+    durations[0] = deltas[0] / 2.0
+    durations[-1] = deltas[-1] / 2.0
+    durations[1:-1] = (deltas[:-1] + deltas[1:]) / 2.0
+    return durations
+
+
+def _input_batch_size(manifest):
+    batch_size = manifest.get("input_batch_size", 1) if manifest else 1
+    if isinstance(batch_size, bool) or not isinstance(
+        batch_size, (int, float)
+    ) or batch_size <= 0:
+        raise ValueError("Manifest input_batch_size must be a positive number")
+    return float(batch_size)
+
+
+def _discard_masks(samples, config, inference_count):
+    power_outliers = np.zeros(len(samples), dtype=bool)
+    initial_discards = np.zeros(len(samples), dtype=bool)
+    trimming_enabled = (
+        inference_count is not None
+        and inference_count >= config.min_inferences_for_trimming
+    )
+    if not trimming_enabled:
+        return power_outliers, initial_discards, False
+
+    for start, end in _run_bounds(samples["is_active"]):
+        sample_count = end - start
+        tail_count = int(config.tail_trim_fraction * sample_count)
+        if tail_count:
+            power = samples["power_raw_W"].iloc[start:end].to_numpy()
+            order = np.argsort(power, kind="stable")
+            power_outliers[start + order[:tail_count]] = True
+            power_outliers[start + order[-tail_count:]] = True
+
+        if config.discard_initial_samples:
+            initial_count = int(config.initial_trim_fraction * sample_count)
+            initial_discards[start : start + initial_count] = True
+
+    return power_outliers, initial_discards, True
+
+
+def _filter_power_after_discard(
+    power,
+    discarded,
+    sampling_rate_hz,
+    config,
+):
+    """Filter retained power without restoring discarded measurements."""
+    discarded_power = power.mask(discarded)
+    hampel_outliers = pd.Series(False, index=power.index, dtype=bool)
+    if not config.filter_after_discard:
+        return discarded_power, discarded_power.copy(), hampel_outliers
+
+    hampel_window = _odd_window(
+        config.hampel_window_seconds,
+        sampling_rate_hz,
+    )
+    rolling_window = _odd_window(
+        config.rolling_window_seconds,
+        sampling_rate_hz,
+    )
+    hampel_input = discarded_power.interpolate(limit_direction="both")
+    cleaned, hampel_outliers = _hampel_clean(
+        hampel_input,
+        hampel_window,
+        config.hampel_sigma,
+    )
+    hampel_outliers &= ~discarded
+    cleaned = cleaned.mask(discarded)
+    smoothed = cleaned.rolling(
+        rolling_window,
+        center=True,
+        min_periods=1,
+    ).mean()
+    return cleaned, smoothed, hampel_outliers
+
+
+def _edge_outlier_counts(mask):
+    leading = 0
+    while leading < len(mask) and mask[leading]:
+        leading += 1
+    trailing = 0
+    while trailing < len(mask) - leading and mask[len(mask) - trailing - 1]:
+        trailing += 1
+    return leading, trailing
+
+
+def _region_statistics(region, sampling_rate_hz, idle_power, input_count):
+    times = region["time_s"]
+    power = region["power_clean_W"].to_numpy(dtype=float)
+    power_outliers = region["is_power_outlier"].to_numpy(dtype=bool)
+    initial_discards = region["is_initial_discard"].to_numpy(dtype=bool)
+    discarded = power_outliers | initial_discards
+    retained = ~discarded
+    if not retained.any():
+        raise ValueError("Trimming removed every sample from an active region")
+
+    sample_durations = _sample_durations(times, sampling_rate_hz)
+    duration = float(sample_durations[retained].sum())
+    energy = float(
+        np.sum((power[retained] - idle_power) * sample_durations[retained])
+    )
+
+    sample_count = len(region)
+    retained_count = int(retained.sum())
+    discarded_count = sample_count - retained_count
+    leading_count, trailing_count = _edge_outlier_counts(discarded)
+    interior_count = discarded_count - leading_count - trailing_count
+    inferences_per_sample = (
+        float(input_count) / sample_count if input_count else np.nan
+    )
+    effective_inferences = inferences_per_sample * retained_count
+    retained_indices = np.flatnonzero(retained)
+
+    return {
+        "original_start_time_s": float(times.iloc[0]),
+        "original_end_time_s": float(times.iloc[-1]),
+        "start_time_s": float(times.iloc[retained_indices[0]]),
+        "end_time_s": float(times.iloc[retained_indices[-1]]),
+        "original_duration_s": float(sample_durations.sum()),
+        "duration_s": duration,
+        "original_sample_count": sample_count,
+        "retained_sample_count": retained_count,
+        "discarded_sample_count": discarded_count,
+        "discarded_power_outlier_sample_count": int(power_outliers.sum()),
+        "discarded_initial_sample_count": int(initial_discards.sum()),
+        "discarded_leading_sample_count": leading_count,
+        "discarded_trailing_sample_count": trailing_count,
+        "discarded_interior_sample_count": interior_count,
+        "active_power_mean_W": idle_power + energy / duration,
+        "power_offset_W": energy / duration,
+        "energy_per_cycle_J": energy,
+        "inferences_per_original_sample": inferences_per_sample,
+        "effective_inference_count": effective_inferences,
+        "discarded_inference_count": inferences_per_sample * discarded_count,
+        "discarded_initial_inference_count": (
+            inferences_per_sample * int(initial_discards.sum())
+        ),
+        "discarded_leading_inference_count": (
+            inferences_per_sample * leading_count
+        ),
+        "discarded_trailing_inference_count": (
+            inferences_per_sample * trailing_count
+        ),
+        "energy_per_inference_J": (
+            energy / effective_inferences if effective_inferences else np.nan
+        ),
+    }
 
 
 def _build_regions(samples, sampling_rate_hz, manifest):
+    forward_pass_count = (
+        manifest.get("plan", {}).get("inferences_per_cycle")
+        if manifest
+        else None
+    )
+    input_count = (
+        float(forward_pass_count) * _input_batch_size(manifest)
+        if forward_pass_count
+        else None
+    )
+    idle_power, baseline_metadata = _idle_baseline(samples, manifest)
     regions = []
-    inferences_per_cycle = None
-    if manifest is not None:
-        inferences_per_cycle = manifest.get("plan", {}).get(
-            "inferences_per_cycle"
-        )
 
-    idle_baseline, baseline_metadata = _idle_baseline(samples, manifest)
     for cycle, (start, end) in enumerate(
         _run_bounds(samples["is_active"]), start=1
     ):
-        active_power = samples["power_clean_W"].iloc[start:end]
-        active_times = samples["time_s"].iloc[start:end]
-        if len(active_times) > 1:
-            deltas = np.diff(active_times.to_numpy(dtype=float))
-            if np.any(deltas <= 0):
-                raise ValueError("Elapsed Time (s) must be strictly increasing")
-            duration = float(active_times.iloc[-1] - active_times.iloc[0])
-            interval_power = (
-                active_power.to_numpy(dtype=float)[:-1]
-                + active_power.to_numpy(dtype=float)[1:]
-            ) / 2.0
-            active_energy = float(np.sum(interval_power * deltas))
-            active_power_mean = active_energy / duration
-        else:
-            duration = _single_sample_duration(
-                samples["time_s"], start, sampling_rate_hz
-            )
-            active_power_mean = float(active_power.iloc[0])
-            active_energy = active_power_mean * duration
-        offset_power = float(active_power_mean - idle_baseline)
-        energy = float(active_energy - idle_baseline * duration)
+        statistics = _region_statistics(
+            samples.iloc[start:end],
+            sampling_rate_hz,
+            idle_power,
+            input_count,
+        )
         regions.append(
             {
                 "cycle": cycle,
-                "start_time_s": float(samples["time_s"].iloc[start]),
-                "end_time_s": float(samples["time_s"].iloc[end - 1]),
-                "duration_s": duration,
-                "active_power_mean_W": active_power_mean,
-                "idle_power_median_W": idle_baseline,
+                **statistics,
+                "idle_power_median_W": idle_power,
                 "idle_baseline_source": baseline_metadata["source"],
-                "power_offset_W": offset_power,
-                "energy_per_cycle_J": energy,
-                "energy_per_inference_J": (
-                    energy / inferences_per_cycle if inferences_per_cycle else np.nan
-                ),
             }
         )
+
     return pd.DataFrame(regions), baseline_metadata
 
 
@@ -468,19 +610,7 @@ def process_measurement(csv_path, manifest_path=None, config=None):
     sampling_rate_hz, rate_source = _sampling_rate(
         data, manifest, config.sampling_rate_hz
     )
-    hampel_window = _odd_window(config.hampel_window_seconds, sampling_rate_hz)
-    smoothing_window = _odd_window(
-        config.smoothing_window_seconds, sampling_rate_hz
-    )
-    cleaned, is_outlier = _hampel_clean(
-        power, hampel_window, config.hampel_sigma
-    )
-    smoothed = cleaned.rolling(
-        smoothing_window, center=True, min_periods=1
-    ).mean()
-    if np.allclose(smoothed, smoothed.iloc[0]):
-        raise ValueError("Power trace is constant; phases cannot be identified")
-    threshold = float(threshold_otsu(smoothed.to_numpy()))
+    threshold = float(threshold_otsu(power.to_numpy()))
     time_axis = _time_axis(data, sampling_rate_hz)
 
     manifest_active, alignment_diagnostics = _aligned_active_mask(
@@ -490,11 +620,39 @@ def process_measurement(csv_path, manifest_path=None, config=None):
         config,
     )
     if manifest_active is None:
-        active = _signal_active_mask(smoothed, threshold, sampling_rate_hz, config)
+        active = _signal_active_mask(power, threshold, sampling_rate_hz, config)
         active_source = "signal hysteresis (Otsu fallback)"
     else:
         active = manifest_active
         active_source = "synchronized manifest elapsed time"
+    samples = data.copy()
+    samples["time_s"] = time_axis
+    samples["power_raw_W"] = power
+    samples["is_active"] = active
+    forward_pass_count = (
+        manifest.get("plan", {}).get("inferences_per_cycle")
+        if manifest
+        else None
+    )
+    input_batch_size = _input_batch_size(manifest)
+    input_count = (
+        float(forward_pass_count) * input_batch_size
+        if forward_pass_count
+        else None
+    )
+    power_outliers, initial_discards, trimming_enabled = _discard_masks(
+        samples,
+        config,
+        input_count,
+    )
+    discarded = power_outliers | initial_discards
+    cleaned, smoothed, hampel_outliers = _filter_power_after_discard(
+        power,
+        discarded,
+        sampling_rate_hz,
+        config,
+    )
+
     preparation = (
         _aligned_preparation_mask(time_axis, manifest, active, config)
         if manifest_active is not None
@@ -511,14 +669,13 @@ def process_measurement(csv_path, manifest_path=None, config=None):
     phase = np.full(len(data), "idle", dtype=object)
     phase[preparation] = "input_and_parameter_preparation"
     phase[active] = "active_inference"
-    samples = data.copy()
-    samples["time_s"] = time_axis
-    samples["power_raw_W"] = power
+    samples["phase"] = phase
+    samples["is_power_outlier"] = power_outliers
+    samples["is_initial_discard"] = initial_discards
+    samples["is_hampel_outlier"] = hampel_outliers
+    samples["is_outlier"] = discarded
     samples["power_clean_W"] = cleaned
     samples["power_smoothed_W"] = smoothed
-    samples["is_outlier"] = is_outlier
-    samples["is_active"] = active
-    samples["phase"] = phase
     regions, idle_baseline_metadata = _build_regions(
         samples,
         sampling_rate_hz,
@@ -533,9 +690,24 @@ def process_measurement(csv_path, manifest_path=None, config=None):
         ),
         "sampling_rate_hz": sampling_rate_hz,
         "sampling_rate_source": rate_source,
+        "input_batch_size": input_batch_size,
+        "input_samples_per_cycle": input_count,
         "threshold_W": threshold,
-        "outlier_count": int(is_outlier.sum()),
-        "outlier_fraction": float(is_outlier.mean()),
+        "outlier_count": int(discarded.sum()),
+        "power_outlier_count": int(power_outliers.sum()),
+        "initial_discard_count": int(initial_discards.sum()),
+        "trimming_enabled": trimming_enabled,
+        "trimming_skip_reason": (
+            None
+            if trimming_enabled
+            else "TRIMMING_SKIPPED_TOO_FEW_INFERENCES"
+        ),
+        "hampel_outlier_count": int(hampel_outliers.sum()),
+        "filter_after_discard": config.filter_after_discard,
+        "outlier_fraction": float(discarded.mean()),
+        "active_outlier_fraction": float(
+            discarded.sum() / active.sum() if active.any() else 0.0
+        ),
         "active_region_count": len(regions),
         "active_classification_source": active_source,
         "clock_alignment_status": alignment_diagnostics["status"],
@@ -595,8 +767,8 @@ def plot_measurement(result, output_path, title=None):
             outliers["time_s"],
             outliers["power_raw_W"],
             color="#c44900",
-            marker="x",
-            s=13,
+            marker=".",
+            s=5,
             linewidths=0.4,
             label="Rejected outlier",
             zorder=4,
@@ -667,6 +839,55 @@ def build_parser():
     parser.add_argument("--output-dir", type=Path, default=Path("cleaned_output"))
     parser.add_argument("--sampling-rate-hz", type=float)
     parser.add_argument(
+        "--tail-trim-percentage",
+        type=float,
+        default=1.0,
+        help="Percentage removed from each power tail in every active region.",
+    )
+    parser.add_argument(
+        "--discard-initial-samples",
+        action="store_true",
+        help="Also discard the first samples of every active region.",
+    )
+    parser.add_argument(
+        "--initial-trim-percentage",
+        type=float,
+        default=1.0,
+        help="Initial time-ordered percentage removed when its flag is set.",
+    )
+    parser.add_argument(
+        "--min-inferences-for-trimming",
+        type=int,
+        default=10,
+        help="Minimum inferences per cycle required before sample trimming.",
+    )
+    parser.add_argument(
+        "--filter-after-discard",
+        action="store_true",
+        help=(
+            "After discarding selected samples, apply Hampel replacement "
+            "followed by a centered rolling mean."
+        ),
+    )
+    parser.add_argument(
+        "--hampel-window-seconds",
+        type=float,
+        default=0.21,
+        help="Centered Hampel window duration used by post-discard filtering.",
+    )
+    parser.add_argument(
+        "--hampel-sigma",
+        type=float,
+        default=4.5,
+        help="Hampel outlier threshold in robust standard deviations.",
+    )
+    parser.add_argument(
+        "--rolling-window-seconds",
+        type=float,
+        default=0.09,
+        help="Centered rolling-mean duration applied after Hampel cleaning.",
+    )
+    parser.add_argument(
         "--max-clock-uncertainty-fraction",
         type=float,
         default=0.50,
@@ -678,6 +899,14 @@ def main():
     args = build_parser().parse_args()
     config = ProcessingConfig(
         sampling_rate_hz=args.sampling_rate_hz,
+        tail_trim_fraction=args.tail_trim_percentage / 100.0,
+        discard_initial_samples=args.discard_initial_samples,
+        initial_trim_fraction=args.initial_trim_percentage / 100.0,
+        min_inferences_for_trimming=args.min_inferences_for_trimming,
+        filter_after_discard=args.filter_after_discard,
+        hampel_window_seconds=args.hampel_window_seconds,
+        hampel_sigma=args.hampel_sigma,
+        rolling_window_seconds=args.rolling_window_seconds,
         max_clock_uncertainty_fraction=(
             args.max_clock_uncertainty_fraction
         ),

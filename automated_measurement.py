@@ -449,6 +449,8 @@ class SshExperimentController:
             args.backend,
             "--model",
             args.model,
+            "--batch-size",
+            str(getattr(args, "batch_size", 1)),
             "--number_of_cycles",
             str(args.number_of_cycles),
             "--sleep_time",
@@ -968,6 +970,7 @@ def build_argument_parser():
     )
     parser.add_argument("--backend", choices=["tpu", "cpu", "cuda"], required=True)
     parser.add_argument("--model", required=True)
+    parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--output-directory", type=Path, required=True)
     parser.add_argument("--port", default=None)
     parser.add_argument("--baud", type=int, default=115200)
@@ -1102,6 +1105,7 @@ def build_local_manager(args, acquisition_controller):
         number_of_cycles=args.number_of_cycles,
         sleep_time=args.sleep_time,
         backend=args.backend,
+        batch_size=getattr(args, "batch_size", 1),
         inferences_per_cycle=args.inferences_per_cycle,
         target_burst_seconds=args.target_burst_seconds,
         sampling_rate_hz=args.sampling_rate_hz,

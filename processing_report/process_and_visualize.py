@@ -9,9 +9,9 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 try:
-    from . import data_processing_discard as dp
+    from . import data_processing as dp
 except ImportError:
-    import data_processing_discard as dp
+    import data_processing as dp
 
 try:
     from .artifact_paths import get_manifest_file_path, load_measurement_metadata
@@ -127,7 +127,7 @@ def _processing_config(args):
     )
 
 
-def process_file(csv_path, metadata, args, combined_axis):
+def process_file(csv_path, metadata, args, combined_axis, write_plot=True):
     manifest_path = get_manifest_file_path(
         args.manifest_dir or args.data_dir,
         csv_path,
@@ -149,7 +149,8 @@ def process_file(csv_path, metadata, args, combined_axis):
         linewidth=0.2,
     )
 
-    dp.plot_measurement(result, args.output_dir / f"{csv_path.stem}.pdf")
+    if write_plot:
+        dp.plot_measurement(result, args.output_dir / f"{csv_path.stem}.pdf")
 
     power_offsets = regions["power_offset_W"]
     energies = regions["energy_per_inference_J"]
@@ -209,10 +210,33 @@ def main():
     if not csv_files:
         raise FileNotFoundError(f"No CSV files found in {args.data_dir}")
 
-    summary_rows = []
+    summary_path = args.output_dir / "summary.csv"
+    summary_rows = {}
+    if summary_path.is_file():
+        try:
+            previous_summary = pd.read_csv(summary_path)
+        except pd.errors.EmptyDataError:
+            previous_summary = pd.DataFrame()
+        if "file" in previous_summary.columns:
+            summary_rows = {
+                str(row["file"]): row
+                for row in previous_summary.to_dict(orient="records")
+                if pd.notna(row["file"])
+            }
+
+    new_summary_rows = []
     skipped_files = 0
+    existing_plot_skips = 0
     combined_figure, combined_axis = plt.subplots(figsize=(15, 7))
     for csv_path in csv_files:
+        plot_path = args.output_dir / f"{csv_path.stem}.pdf"
+        summary_key = str(csv_path.relative_to(args.data_dir))
+        if plot_path.is_file() and summary_key in summary_rows:
+            skipped_files += 1
+            existing_plot_skips += 1
+            print(f"Skipping {csv_path}: plot and summary row already exist")
+            continue
+
         metadata = load_measurement_metadata(manifest_dir, csv_path)
         if metadata is None:
             skipped_files += 1
@@ -222,32 +246,39 @@ def main():
             )
             continue
         try:
-            summary_rows.append(
-                process_file(csv_path, metadata, args, combined_axis)
+            summary_row = process_file(
+                csv_path,
+                metadata,
+                args,
+                combined_axis,
+                write_plot=not plot_path.is_file(),
             )
+            summary_rows[summary_row["file"]] = summary_row
+            new_summary_rows.append(summary_row)
         except (ValueError, IndexError) as error:
             raise ValueError(f"Could not process {csv_path}: {error}") from error
 
-    if not summary_rows:
+    if not new_summary_rows and not summary_rows:
         raise RuntimeError("No CSV file has a matching COMPLETE manifest")
 
-    combined_axis.set_title("Smoothed power comparison")
-    combined_axis.set_xlabel("Time (s)")
-    combined_axis.set_ylabel("Power (W)")
-    combined_axis.grid(True, alpha=0.3)
-    combined_axis.legend()
-    combined_figure.tight_layout()
-    combined_figure.savefig(
-        args.output_dir / "smoothed_power_comparison.pdf", format="pdf"
-    )
-    # plt.show()
+    if new_summary_rows:
+        combined_axis.set_title("Smoothed power comparison")
+        combined_axis.set_xlabel("Time (s)")
+        combined_axis.set_ylabel("Power (W)")
+        combined_axis.grid(True, alpha=0.3)
+        combined_axis.legend()
+        combined_figure.tight_layout()
+        combined_figure.savefig(
+            args.output_dir / "smoothed_power_comparison.pdf", format="pdf"
+        )
     plt.close(combined_figure)
 
-    pd.DataFrame(summary_rows).to_csv(
-        args.output_dir / "summary.csv", index=False
+    pd.DataFrame(summary_rows.values()).to_csv(summary_path, index=False)
+    print(f"Processed {len(new_summary_rows)} files")
+    print(f"Skipped {existing_plot_skips} files with existing plots")
+    print(
+        f"Skipped {skipped_files - existing_plot_skips} incomplete or unpaired files"
     )
-    print(f"Processed {len(summary_rows)} files")
-    print(f"Skipped {skipped_files} incomplete or unpaired files")
     print(f"Summary saved to: {args.output_dir}")
 
 
