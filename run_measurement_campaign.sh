@@ -25,6 +25,8 @@ LENET_MODEL_PATH="${LENET_MODEL_PATH:-${LENET_MODEL_DIRECTORY}/Lenet${MODEL_SUFF
 POOL_MODEL_DIRECTORY="${POOL_MODEL_DIRECTORY:-${MODEL_ROOT}/Pool}"
 RELU_MODEL_DIRECTORY="${RELU_MODEL_DIRECTORY:-${MODEL_ROOT}/ReLU}"
 FLATTEN_MODEL_DIRECTORY="${FLATTEN_MODEL_DIRECTORY:-${MODEL_ROOT}/Flatten}"
+RESNET18_MODEL_DIRECTORY="${RESNET18_MODEL_DIRECTORY:-${MODEL_ROOT}/ResNet18}"
+RESNET18_MODEL_PATH="${RESNET18_MODEL_PATH:-${RESNET18_MODEL_DIRECTORY}/ResNet18_${RESNET18_IMAGE_SIZE:-224}_${RESNET18_NUM_CLASSES:-1000}${MODEL_SUFFIX}}"
 
 NUMBER_OF_CYCLES="${NUMBER_OF_CYCLES:-100}"
 BATCH_SIZE="${BATCH_SIZE:-1}"
@@ -83,6 +85,47 @@ LENET_COMPONENT_MODELS=(
     "${LINEAR_MODEL_DIRECTORY}/Linear_128_64${MODEL_SUFFIX}"
 )
 
+# ResNet-18 uses the standard [2, 2, 2, 2] basic-block layout. This list contains
+# each distinct shape-specific operation once; repeat counts are part of the graph.
+RESNET18_IMAGE_SIZE="${RESNET18_IMAGE_SIZE:-224}"
+RESNET18_NUM_CLASSES="${RESNET18_NUM_CLASSES:-1000}"
+RESNET_STEM_SIZE=$(((RESNET18_IMAGE_SIZE + 1) / 2))
+RESNET_STAGE1_SIZE=$(((RESNET_STEM_SIZE + 1) / 2))
+RESNET_STAGE2_SIZE=$(((RESNET_STAGE1_SIZE + 1) / 2))
+RESNET_STAGE3_SIZE=$(((RESNET_STAGE2_SIZE + 1) / 2))
+RESNET_STAGE4_SIZE=$(((RESNET_STAGE3_SIZE + 1) / 2))
+RESNET18_COMPONENT_MODELS=(
+    "${RESNET18_MODEL_DIRECTORY}/ResNetConv_3_64_${RESNET18_IMAGE_SIZE}_7_2_3${MODEL_SUFFIX}"
+    "${RESNET18_MODEL_DIRECTORY}/ResNetBatchNorm_64_${RESNET_STEM_SIZE}${MODEL_SUFFIX}"
+    "${RELU_MODEL_DIRECTORY}/ReLU_1_64_${RESNET_STEM_SIZE}_${RESNET_STEM_SIZE}${MODEL_SUFFIX}"
+    "${RESNET18_MODEL_DIRECTORY}/ResNetMaxPool_64_${RESNET_STEM_SIZE}_3_2_1${MODEL_SUFFIX}"
+    "${RESNET18_MODEL_DIRECTORY}/ResNetConv_64_64_${RESNET_STAGE1_SIZE}_3_1_1${MODEL_SUFFIX}"
+    "${RESNET18_MODEL_DIRECTORY}/ResNetBatchNorm_64_${RESNET_STAGE1_SIZE}${MODEL_SUFFIX}"
+    "${RELU_MODEL_DIRECTORY}/ReLU_1_64_${RESNET_STAGE1_SIZE}_${RESNET_STAGE1_SIZE}${MODEL_SUFFIX}"
+    "${RESNET18_MODEL_DIRECTORY}/ResNetResidualAdd_64_${RESNET_STAGE1_SIZE}${MODEL_SUFFIX}"
+    "${RESNET18_MODEL_DIRECTORY}/ResNetConv_64_128_${RESNET_STAGE1_SIZE}_3_2_1${MODEL_SUFFIX}"
+    "${RESNET18_MODEL_DIRECTORY}/ResNetConv_64_128_${RESNET_STAGE1_SIZE}_1_2_0${MODEL_SUFFIX}"
+    "${RESNET18_MODEL_DIRECTORY}/ResNetBatchNorm_128_${RESNET_STAGE2_SIZE}${MODEL_SUFFIX}"
+    "${RESNET18_MODEL_DIRECTORY}/ResNetConv_128_128_${RESNET_STAGE2_SIZE}_3_1_1${MODEL_SUFFIX}"
+    "${RELU_MODEL_DIRECTORY}/ReLU_1_128_${RESNET_STAGE2_SIZE}_${RESNET_STAGE2_SIZE}${MODEL_SUFFIX}"
+    "${RESNET18_MODEL_DIRECTORY}/ResNetResidualAdd_128_${RESNET_STAGE2_SIZE}${MODEL_SUFFIX}"
+    "${RESNET18_MODEL_DIRECTORY}/ResNetConv_128_256_${RESNET_STAGE2_SIZE}_3_2_1${MODEL_SUFFIX}"
+    "${RESNET18_MODEL_DIRECTORY}/ResNetConv_128_256_${RESNET_STAGE2_SIZE}_1_2_0${MODEL_SUFFIX}"
+    "${RESNET18_MODEL_DIRECTORY}/ResNetBatchNorm_256_${RESNET_STAGE3_SIZE}${MODEL_SUFFIX}"
+    "${RESNET18_MODEL_DIRECTORY}/ResNetConv_256_256_${RESNET_STAGE3_SIZE}_3_1_1${MODEL_SUFFIX}"
+    "${RELU_MODEL_DIRECTORY}/ReLU_1_256_${RESNET_STAGE3_SIZE}_${RESNET_STAGE3_SIZE}${MODEL_SUFFIX}"
+    "${RESNET18_MODEL_DIRECTORY}/ResNetResidualAdd_256_${RESNET_STAGE3_SIZE}${MODEL_SUFFIX}"
+    "${RESNET18_MODEL_DIRECTORY}/ResNetConv_256_512_${RESNET_STAGE3_SIZE}_3_2_1${MODEL_SUFFIX}"
+    "${RESNET18_MODEL_DIRECTORY}/ResNetConv_256_512_${RESNET_STAGE3_SIZE}_1_2_0${MODEL_SUFFIX}"
+    "${RESNET18_MODEL_DIRECTORY}/ResNetBatchNorm_512_${RESNET_STAGE4_SIZE}${MODEL_SUFFIX}"
+    "${RESNET18_MODEL_DIRECTORY}/ResNetConv_512_512_${RESNET_STAGE4_SIZE}_3_1_1${MODEL_SUFFIX}"
+    "${RELU_MODEL_DIRECTORY}/ReLU_1_512_${RESNET_STAGE4_SIZE}_${RESNET_STAGE4_SIZE}${MODEL_SUFFIX}"
+    "${RESNET18_MODEL_DIRECTORY}/ResNetResidualAdd_512_${RESNET_STAGE4_SIZE}${MODEL_SUFFIX}"
+    "${RESNET18_MODEL_DIRECTORY}/ResNetAvgPool_512_${RESNET_STAGE4_SIZE}_1${MODEL_SUFFIX}"
+    "${FLATTEN_MODEL_DIRECTORY}/Flatten_1_512_1_1${MODEL_SUFFIX}"
+    "${LINEAR_MODEL_DIRECTORY}/Linear_512_${RESNET18_NUM_CLASSES}${MODEL_SUFFIX}"
+)
+
 # Set REPEAT_COMPLETED=1 to rerun models that already have a COMPLETE manifest
 # in this board's output directory. Set CONTINUE_ON_ERROR=1 to keep scheduling
 # after an experiment fails.
@@ -96,8 +139,9 @@ Usage:
 
 Options:
   --board LABEL       Safe label used only for the local result directory.
-    --suite SUITE       linear, conv, lenet, or all (default: all). The lenet
-                                            suite includes LeNet and every operation in its graph.
+    --suite SUITE       linear, conv, lenet, resnet18, or all (default: all).
+                                                The lenet and resnet18 suites include each architecture
+                                                and every distinct shape-specific operation in its graph.
   --dry-run           Print commands without running measurements.
   --continue-on-error Continue after an experiment exits nonzero.
   --repeat-completed  Rerun experiments with an existing COMPLETE manifest.
@@ -110,7 +154,7 @@ the script finishes, then invoke it again with a new BOARD_LABEL/configuration.
 
 Examples:
   ./run_measurement_campaign.sh --board jetson_nano --suite all
-    ./run_measurement_campaign.sh --board jetson_nano --suite lenet
+    ./run_measurement_campaign.sh --board jetson_nano --suite resnet18
   ./run_measurement_campaign.sh --board pi5 --suite linear --dry-run
 
 Override parameters without editing the script:
@@ -208,14 +252,18 @@ done
 [[ -n "$BOARD_LABEL" ]] || die "--board is required"
 [[ "$BOARD_LABEL" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] ||
     die "--board may contain only letters, numbers, dot, underscore, and dash"
-[[ "$SUITE" == "linear" || "$SUITE" == "conv" || "$SUITE" == "all" || "$SUITE" == "lenet" ]] ||
-    die "--suite must be linear, conv, lenet or all"
+[[ "$SUITE" == "linear" || "$SUITE" == "conv" || "$SUITE" == "all" || "$SUITE" == "lenet" || "$SUITE" == "resnet18" ]] ||
+    die "--suite must be linear, conv, lenet, resnet18 or all"
 [[ "$BACKEND" == "cpu" || "$BACKEND" == "cuda" || "$BACKEND" == "tpu" ]] ||
     die "BACKEND must be cpu, cuda, or tpu"
 [[ "$NUMBER_OF_CYCLES" =~ ^[1-9][0-9]*$ ]] ||
     die "NUMBER_OF_CYCLES must be a positive integer"
 [[ "$BATCH_SIZE" =~ ^[1-9][0-9]*$ ]] ||
     die "BATCH_SIZE must be a positive integer"
+[[ "$RESNET18_IMAGE_SIZE" =~ ^[3-9][0-9]*$ || "$RESNET18_IMAGE_SIZE" =~ ^[1-9][0-9]{2,}$ ]] ||
+    die "RESNET18_IMAGE_SIZE must be an integer of at least 32"
+[[ "$RESNET18_NUM_CLASSES" =~ ^[1-9][0-9]*$ ]] ||
+    die "RESNET18_NUM_CLASSES must be a positive integer"
 [[ "$MIN_ACTIVE_SAMPLES" =~ ^[1-9][0-9]*$ ]] ||
     die "MIN_ACTIVE_SAMPLES must be a positive integer"
 [[ "$WARMUP_INFERENCES" =~ ^[0-9]+$ ]] ||
@@ -349,6 +397,7 @@ fi
 linear_total=0
 conv_total=0
 lenet_total=0
+resnet18_total=0
 if [[ "$SUITE" == "linear" || "$SUITE" == "all" ]]; then
     linear_total=$((${#LINEAR_SIZE_LIST[@]} * ${#LINEAR_SIZE_LIST[@]}))
 fi
@@ -358,11 +407,14 @@ fi
 if [[ "$SUITE" == "lenet" || "$SUITE" == "all" ]]; then
     lenet_total=$((1 + ${#LENET_COMPONENT_MODELS[@]}))
 fi
-total=$((linear_total + conv_total + lenet_total))
+if [[ "$SUITE" == "resnet18" || "$SUITE" == "all" ]]; then
+    resnet18_total=$((1 + ${#RESNET18_COMPONENT_MODELS[@]}))
+fi
+total=$((linear_total + conv_total + lenet_total + resnet18_total))
 
 printf 'Board label: %s\n' "$BOARD_LABEL"
-printf 'Suite: %s (%d Linear, %d Conv, %d LeNet, %d total)\n' \
-    "$SUITE" "$linear_total" "$conv_total" "$lenet_total" "$total"
+printf 'Suite: %s (%d Linear, %d Conv, %d LeNet, %d ResNet-18, %d total)\n' \
+    "$SUITE" "$linear_total" "$conv_total" "$lenet_total" "$resnet18_total" "$total"
 printf 'Results: %s\n' "$OUTPUT_DIRECTORY"
 ((DRY_RUN == 0)) || printf 'Mode: dry-run (no measurements will start)\n'
 
@@ -486,6 +538,13 @@ fi
 if [[ "$SUITE" == "lenet" || "$SUITE" == "all" ]]; then
     run_experiment "$LENET_MODEL_PATH"
     for model_path in "${LENET_COMPONENT_MODELS[@]}"; do
+        run_experiment "$model_path"
+    done
+fi
+
+if [[ "$SUITE" == "resnet18" || "$SUITE" == "all" ]]; then
+    run_experiment "$RESNET18_MODEL_PATH"
+    for model_path in "${RESNET18_COMPONENT_MODELS[@]}"; do
         run_experiment "$model_path"
     done
 fi

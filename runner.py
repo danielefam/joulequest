@@ -199,6 +199,90 @@ if _torch_available:
             "num_classes": params[1] if len(params) == 2 else 1000,
         }
 
+    def _parse_resnet_conv(params, filename):
+        _require_parameter_count(
+            "ResNetConv",
+            params,
+            {6},
+            "ResNetConv_<in_channels>_<out_channels>_<image_size>_"
+            "<kernel_size>_<stride>_<padding>",
+        )
+        if any(value <= 0 for value in params[:5]) or params[5] < 0:
+            raise ValueError("ResNetConv dimensions and stride must be positive")
+        return {
+            "type": "resnetconv",
+            "in_channels": params[0],
+            "out_channels": params[1],
+            "image_size": params[2],
+            "kernel_size": params[3],
+            "stride": params[4],
+            "padding": params[5],
+        }
+
+    def _parse_resnet_batch_norm(params, filename):
+        _require_parameter_count(
+            "ResNetBatchNorm",
+            params,
+            {2},
+            "ResNetBatchNorm_<channels>_<image_size>",
+        )
+        if any(value <= 0 for value in params):
+            raise ValueError("ResNetBatchNorm dimensions must be positive")
+        return {
+            "type": "resnetbatchnorm",
+            "channels": params[0],
+            "image_size": params[1],
+        }
+
+    def _parse_resnet_maxpool(params, filename):
+        _require_parameter_count(
+            "ResNetMaxPool",
+            params,
+            {5},
+            "ResNetMaxPool_<channels>_<image_size>_<kernel_size>_<stride>_<padding>",
+        )
+        if any(value <= 0 for value in params[:4]) or params[4] < 0:
+            raise ValueError("ResNetMaxPool dimensions and stride must be positive")
+        return {
+            "type": "resnetmaxpool",
+            "channels": params[0],
+            "image_size": params[1],
+            "kernel_size": params[2],
+            "stride": params[3],
+            "padding": params[4],
+        }
+
+    def _parse_resnet_residual_add(params, filename):
+        _require_parameter_count(
+            "ResNetResidualAdd",
+            params,
+            {2},
+            "ResNetResidualAdd_<channels>_<image_size>",
+        )
+        if any(value <= 0 for value in params):
+            raise ValueError("ResNetResidualAdd dimensions must be positive")
+        return {
+            "type": "resnetresidualadd",
+            "channels": params[0],
+            "image_size": params[1],
+        }
+
+    def _parse_resnet_avgpool(params, filename):
+        _require_parameter_count(
+            "ResNetAvgPool",
+            params,
+            {3},
+            "ResNetAvgPool_<channels>_<image_size>_<output_size>",
+        )
+        if any(value <= 0 for value in params):
+            raise ValueError("ResNetAvgPool dimensions must be positive")
+        return {
+            "type": "resnetavgpool",
+            "channels": params[0],
+            "image_size": params[1],
+            "output_size": params[2],
+        }
+
     def _parse_activation(layer_type):
         def parse(params, filename):
             if not params or any(dimension <= 0 for dimension in params):
@@ -311,6 +395,12 @@ if _torch_available:
             outputs = self.activation(self.normalization1(self.convolution1(inputs)))
             outputs = self.normalization2(self.convolution2(outputs))
             return self.activation(outputs + residual)
+
+    class ResNetResidualAdd(nn.Module):
+        """Standalone residual add with the same tensor shape on both branches."""
+
+        def forward(self, inputs):
+            return inputs + inputs
 
     class ResNet18(nn.Module):
         def __init__(self, num_classes):
@@ -436,6 +526,67 @@ if _torch_available:
             parse=_parse_resnet18,
             build=lambda params: ResNet18(params["num_classes"]),
             input_shape=lambda params: (1, 3, params["image_size"], params["image_size"]),
+        ),
+        "resnetconv": TorchLayerDefinition(
+            parse=_parse_resnet_conv,
+            build=lambda params: nn.Conv2d(
+                params["in_channels"],
+                params["out_channels"],
+                kernel_size=params["kernel_size"],
+                stride=params["stride"],
+                padding=params["padding"],
+                bias=False,
+            ),
+            input_shape=lambda params: (
+                1,
+                params["in_channels"],
+                params["image_size"],
+                params["image_size"],
+            ),
+        ),
+        "resnetbatchnorm": TorchLayerDefinition(
+            parse=_parse_resnet_batch_norm,
+            build=lambda params: nn.BatchNorm2d(params["channels"]),
+            input_shape=lambda params: (
+                1,
+                params["channels"],
+                params["image_size"],
+                params["image_size"],
+            ),
+        ),
+        "resnetmaxpool": TorchLayerDefinition(
+            parse=_parse_resnet_maxpool,
+            build=lambda params: nn.MaxPool2d(
+                kernel_size=params["kernel_size"],
+                stride=params["stride"],
+                padding=params["padding"],
+            ),
+            input_shape=lambda params: (
+                1,
+                params["channels"],
+                params["image_size"],
+                params["image_size"],
+            ),
+        ),
+        "resnetresidualadd": TorchLayerDefinition(
+            parse=_parse_resnet_residual_add,
+            build=lambda params: ResNetResidualAdd(),
+            input_shape=lambda params: (
+                1,
+                params["channels"],
+                params["image_size"],
+                params["image_size"],
+            ),
+        ),
+        "resnetavgpool": TorchLayerDefinition(
+            parse=_parse_resnet_avgpool,
+            build=lambda params: nn.AdaptiveAvgPool2d(params["output_size"]),
+            input_shape=lambda params: (
+                1,
+                params["channels"],
+                params["image_size"],
+                params["image_size"],
+            ),
         ),
         "relu": TorchLayerDefinition(
             parse=_parse_activation("relu"),

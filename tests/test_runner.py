@@ -129,6 +129,51 @@ class TorchRunnerLegacyCompatibilityTests(unittest.TestCase):
                 (1, 3, 32, 32),
                 (1, 10),
             ),
+            (
+                "ResNetConv_3_64_32_7_2_3.pt",
+                {
+                    "type": "resnetconv",
+                    "in_channels": 3,
+                    "out_channels": 64,
+                    "image_size": 32,
+                    "kernel_size": 7,
+                    "stride": 2,
+                    "padding": 3,
+                },
+                (1, 3, 32, 32),
+                (1, 64, 16, 16),
+            ),
+            (
+                "ResNetBatchNorm_64_16.pt",
+                {"type": "resnetbatchnorm", "channels": 64, "image_size": 16},
+                (1, 64, 16, 16),
+                (1, 64, 16, 16),
+            ),
+            (
+                "ResNetMaxPool_64_16_3_2_1.pt",
+                {
+                    "type": "resnetmaxpool",
+                    "channels": 64,
+                    "image_size": 16,
+                    "kernel_size": 3,
+                    "stride": 2,
+                    "padding": 1,
+                },
+                (1, 64, 16, 16),
+                (1, 64, 8, 8),
+            ),
+            (
+                "ResNetResidualAdd_64_8.pt",
+                {"type": "resnetresidualadd", "channels": 64, "image_size": 8},
+                (1, 64, 8, 8),
+                (1, 64, 8, 8),
+            ),
+            (
+                "ResNetAvgPool_512_1_1.pt",
+                {"type": "resnetavgpool", "channels": 512, "image_size": 1, "output_size": 1},
+                (1, 512, 1, 1),
+                (1, 512, 1, 1),
+            ),
         ]
 
         for model_name, expected_params, input_shape, output_shape in cases:
