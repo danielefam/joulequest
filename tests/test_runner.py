@@ -112,6 +112,23 @@ class TorchRunnerLegacyCompatibilityTests(unittest.TestCase):
                 (1, 32, 4, 4),
                 (1, 512),
             ),
+            (
+                "RotaryAttention_5_8_2.pt",
+                {
+                    "type": "rotaryattention",
+                    "input_token": 5,
+                    "embed_dim": 8,
+                    "num_heads": 2,
+                },
+                (5, 1, 8),
+                (5, 1, 8),
+            ),
+            (
+                "ResNet18_32_10.pt",
+                {"type": "resnet18", "image_size": 32, "num_classes": 10},
+                (1, 3, 32, 32),
+                (1, 10),
+            ),
         ]
 
         for model_name, expected_params, input_shape, output_shape in cases:
@@ -122,7 +139,7 @@ class TorchRunnerLegacyCompatibilityTests(unittest.TestCase):
                 self.assertEqual(tuple(runner.input_data.shape), input_shape)
                 expected_batch_size = (
                     input_shape[1]
-                    if expected_params["type"] == "attention"
+                    if expected_params["type"] in {"attention", "rotaryattention"}
                     else input_shape[0]
                 )
                 self.assertEqual(runner.input_batch_size, expected_batch_size)
@@ -134,6 +151,18 @@ class TorchRunnerLegacyCompatibilityTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unsupported layer type"):
             self.build_runner("Unknown_1.pt")
 
+    def test_layer_names_are_case_insensitive(self):
+        cases = [
+            ("lInEaR_8_4.pt", "linear"),
+            ("rElU_1_8.pt", "relu"),
+            ("rOtArYaTtEnTiOn_5_8_2.pt", "rotaryattention"),
+            ("rEsNeT18_32_10.pt", "resnet18"),
+        ]
+
+        for model_name, expected_type in cases:
+            with self.subTest(model_name=model_name):
+                self.assertEqual(self.build_runner(model_name).params["type"], expected_type)
+
     def test_activation_dimensions_must_be_positive(self):
         with self.assertRaisesRegex(ValueError, "positive input dimensions"):
             self.build_runner("ReLU_1_0_8_8.pt")
@@ -141,14 +170,26 @@ class TorchRunnerLegacyCompatibilityTests(unittest.TestCase):
     def test_batch_size_replaces_the_model_input_batch_dimension(self):
         linear = TorchRunner("models/Linear_8_4.pt", batch_size=4)
         attention = TorchRunner("models/Attention_5_8_2.pt", batch_size=3)
+        rotary_attention = TorchRunner(
+            "models/RotaryAttention_5_8_2.pt", batch_size=3
+        )
 
         linear.generate_input()
         attention.generate_input()
+        rotary_attention.generate_input()
 
         self.assertEqual(tuple(linear.input_data.shape), (4, 8))
         self.assertEqual(tuple(attention.input_data.shape), (5, 3, 8))
+        self.assertEqual(tuple(rotary_attention.input_data.shape), (5, 3, 8))
         self.assertEqual(linear.input_batch_size, 4)
         self.assertEqual(attention.input_batch_size, 3)
+        self.assertEqual(rotary_attention.input_batch_size, 3)
+
+    def test_rotary_attention_requires_compatible_head_dimension(self):
+        with self.assertRaisesRegex(ValueError, "divisible by num_heads"):
+            self.build_runner("RotaryAttention_5_10_3.pt")
+        with self.assertRaisesRegex(ValueError, "head dimension must be even"):
+            self.build_runner("RotaryAttention_5_6_2.pt")
 
 
 if __name__ == "__main__":
