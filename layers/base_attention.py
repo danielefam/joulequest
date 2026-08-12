@@ -17,6 +17,49 @@ from torch.nn import Module
 from torch.nn.functional import dropout
 from typing import Optional, Tuple
 
+
+def _canonical_mask(mask, target_type):
+    """Convert boolean masks to additive masks without private PyTorch APIs."""
+    if mask is None:
+        return None
+    if mask.dtype == torch.bool:
+        return torch.zeros_like(mask, dtype=target_type).masked_fill_(mask, float("-inf"))
+    if not torch.is_floating_point(mask):
+        raise TypeError("attention masks must be boolean or floating-point tensors")
+    return mask.to(dtype=target_type)
+
+
+def _scaled_dot_product_attention(query, key, value, attn_mask, dropout_p, is_causal):
+    """Use PyTorch's fused kernel when available, otherwise a vectorized fallback."""
+    native_attention = getattr(F, "scaled_dot_product_attention", None)
+    if native_attention is not None:
+        return native_attention(
+            query,
+            key,
+            value,
+            attn_mask=attn_mask,
+            dropout_p=dropout_p,
+            is_causal=is_causal,
+            scale=1.0 / math.sqrt(query.size(-1)),
+        )
+
+    attention_scores = torch.matmul(query, key.transpose(-2, -1))
+    attention_scores = attention_scores / math.sqrt(query.size(-1))
+    if is_causal:
+        causal_mask = torch.ones(
+            attention_scores.shape[-2:],
+            dtype=torch.bool,
+            device=attention_scores.device,
+        ).triu(1)
+        attention_scores = attention_scores.masked_fill(causal_mask, float("-inf"))
+    if attn_mask is not None:
+        attention_scores = attention_scores + attn_mask
+    attention_weights = F.softmax(attention_scores, dim=-1)
+    if dropout_p > 0.0:
+        attention_weights = F.dropout(attention_weights, p=dropout_p)
+    return torch.matmul(attention_weights, value)
+
+
 # ---------------------------------------------------------------------------
 # MultiheadAttention  (flexible drop-in for nn.MultiheadAttention)
 # ---------------------------------------------------------------------------
@@ -87,21 +130,8 @@ class MultiheadAttention(Module):
     ) -> Tuple[Tensor, Optional[Tensor]]:
         is_batched = query.dim() == 3
 
-        key_padding_mask = F._canonical_mask(
-            mask=key_padding_mask,
-            mask_name="key_padding_mask",
-            other_type=F._none_or_dtype(attn_mask),
-            other_name="attn_mask",
-            target_type=query.dtype,
-        )
-        attn_mask = F._canonical_mask(
-            mask=attn_mask,
-            mask_name="attn_mask",
-            other_type=None,
-            other_name="",
-            target_type=query.dtype,
-            check_other=False,
-        )
+        key_padding_mask = _canonical_mask(key_padding_mask, query.dtype)
+        attn_mask = _canonical_mask(attn_mask, query.dtype)
 
         if not is_batched:
             query = query.unsqueeze(1)
@@ -199,9 +229,8 @@ class MultiheadAttention(Module):
             k = k.view(bsz, self.num_heads, src_len, self.head_dim_qk)
             v = v.view(bsz, self.num_heads, src_len, self.head_dim_vo)
 
-            attn_output = F.scaled_dot_product_attention(
-                q, k, v, attn_mask, dropout_p, is_causal,
-                scale=1.0 / math.sqrt(self.head_dim_qk),
+            attn_output = _scaled_dot_product_attention(
+                q, k, v, attn_mask, dropout_p, is_causal
             )
             attn_output = (
                 attn_output.permute(2, 0, 1, 3)

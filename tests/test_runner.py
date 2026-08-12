@@ -8,6 +8,7 @@ except ImportError:
 
 if torch is not None:
     from runner import TorchRunner
+    from layers.base_attention import MultiheadAttention
 
 
 @unittest.skipIf(torch is None, "PyTorch is not installed")
@@ -235,6 +236,22 @@ class TorchRunnerLegacyCompatibilityTests(unittest.TestCase):
             self.build_runner("RotaryAttention_5_10_3.pt")
         with self.assertRaisesRegex(ValueError, "head dimension must be even"):
             self.build_runner("RotaryAttention_5_6_2.pt")
+
+    def test_attention_fallback_supports_pytorch_1_10(self):
+        attention = MultiheadAttention(8, 2).eval()
+        inputs = torch.randn(5, 3, 8)
+        native_attention = getattr(torch.nn.functional, "scaled_dot_product_attention", None)
+
+        try:
+            delattr(torch.nn.functional, "scaled_dot_product_attention")
+            with torch.inference_mode():
+                outputs, weights = attention(inputs, inputs, inputs, need_weights=False)
+        finally:
+            if native_attention is not None:
+                torch.nn.functional.scaled_dot_product_attention = native_attention
+
+        self.assertEqual(tuple(outputs.shape), (5, 3, 8))
+        self.assertIsNone(weights)
 
 
 if __name__ == "__main__":
