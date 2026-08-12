@@ -1,5 +1,6 @@
 import torch
 from torch import nn
+from . import base_attention
 
 
 class SelfAttention(nn.Module):
@@ -7,7 +8,7 @@ class SelfAttention(nn.Module):
 
     def __init__(self, embed_dim, num_heads):
         super().__init__()
-        self.attention = nn.MultiheadAttention(embed_dim, num_heads)
+        self.attention = base_attention.MultiheadAttention(embed_dim, num_heads)
 
     def forward(self, inputs):
         return self.attention(
