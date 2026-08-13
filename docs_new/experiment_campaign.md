@@ -142,6 +142,8 @@ campaign parameters:
 | `CONV_MODEL_DIRECTORY` | `${MODEL_ROOT}/Conv` | Conv model directory |
 | `MODEL_SUFFIX` | `.pt` | Filename suffix |
 | `NUMBER_OF_CYCLES` | `100` | Measured cycles per experiment |
+| `LINEAR_CONV_BATCH_SIZE` | `BATCH_SIZE`, otherwise `1` | Input batch size for Linear and Conv suites |
+| `NETWORK_BATCH_SIZE` | `BATCH_SIZE`, otherwise `8` | Input batch size for LeNet and ResNet-18, including their components |
 | `SLEEP_TIME` | `3` s | Idle time between measured cycles of one layer |
 | `TARGET_BURST_SECONDS` | `0` s | Time requirement in addition to sample requirement |
 | `SAMPLING_RATE_HZ` | `100` Hz | Requested INA226 sampling rate |
@@ -187,6 +189,17 @@ example, a CPU board with a lower current range can use:
 BACKEND=cpu MAX_EXPECTED_CURRENT_A=3.0 \
   ./run_measurement_campaign.sh --board BOARD_LABEL --suite all
 ```
+
+Use separate batch sizes for the layer matrices and complete-network suites:
+
+```bash
+LINEAR_CONV_BATCH_SIZE=1 NETWORK_BATCH_SIZE=8 \
+  ./run_measurement_campaign.sh --board BOARD_LABEL --suite all
+```
+
+`BATCH_SIZE` remains supported as a common fallback for both variables. Resume
+checks include both the model path and selected batch size, so a completed run
+at one batch size does not suppress a measurement at another.
 
 A reduced validation matrix can use:
 

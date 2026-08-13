@@ -29,7 +29,12 @@ RESNET18_MODEL_DIRECTORY="${RESNET18_MODEL_DIRECTORY:-${MODEL_ROOT}/ResNet18}"
 RESNET18_MODEL_PATH="${RESNET18_MODEL_PATH:-${RESNET18_MODEL_DIRECTORY}/ResNet18_${RESNET18_IMAGE_SIZE:-224}_${RESNET18_NUM_CLASSES:-1000}${MODEL_SUFFIX}}"
 
 NUMBER_OF_CYCLES="${NUMBER_OF_CYCLES:-100}"
-BATCH_SIZE="${BATCH_SIZE:-1}"
+# BATCH_SIZE remains a compatibility override when the two suite-specific
+# values are not supplied. The default campaign uses batch 1 for layer matrices
+# and batch 8 for complete-network suites.
+BATCH_SIZE="${BATCH_SIZE:-}"
+LINEAR_CONV_BATCH_SIZE="${LINEAR_CONV_BATCH_SIZE:-${BATCH_SIZE:-1}}"
+NETWORK_BATCH_SIZE="${NETWORK_BATCH_SIZE:-${BATCH_SIZE:-8}}"
 SLEEP_TIME="${SLEEP_TIME:-3}"
 TARGET_BURST_SECONDS="${TARGET_BURST_SECONDS:-0}"
 SAMPLING_RATE_HZ="${SAMPLING_RATE_HZ:-100}"
@@ -70,7 +75,7 @@ CONV_KERNEL_PADDING="${CONV_KERNEL_PADDING:-3:0 3:1 5:0 5:1}"
 
 # Ordered standalone operations in TorchRunner's LeNet definition. The first
 # dimension of ReLU and Flatten models is the batch dimension and is replaced
-# by BATCH_SIZE by the runner.
+# by NETWORK_BATCH_SIZE by the runner.
 LENET_COMPONENT_MODELS=(
     "${CONV_MODEL_DIRECTORY}/Conv_1_32_5_0_8${MODEL_SUFFIX}"
     "${POOL_MODEL_DIRECTORY}/MaxPool_8_28_2${MODEL_SUFFIX}"
@@ -158,7 +163,8 @@ Examples:
   ./run_measurement_campaign.sh --board pi5 --suite linear --dry-run
 
 Override parameters without editing the script:
-    BACKEND=cpu BATCH_SIZE=16 MAX_EXPECTED_CURRENT_A=3.0 \
+    BACKEND=cpu LINEAR_CONV_BATCH_SIZE=16 NETWORK_BATCH_SIZE=8 \
+    MAX_EXPECTED_CURRENT_A=3.0 \
     ./run_measurement_campaign.sh --board pi5 --suite all
 EOF
 }
@@ -185,13 +191,15 @@ print_command() {
 
 manifest_exists_for_model() {
     local model_path="$1"
-    "$PYTHON_BIN" - "$OUTPUT_DIRECTORY" "$model_path" <<'PY'
+    local batch_size="$2"
+    "$PYTHON_BIN" - "$OUTPUT_DIRECTORY" "$model_path" "$batch_size" <<'PY'
 import json
 import sys
 from pathlib import Path
 
 output_directory = Path(sys.argv[1])
 model_path = sys.argv[2]
+batch_size = int(sys.argv[3])
 for manifest_path in output_directory.glob("*.json"):
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -200,6 +208,7 @@ for manifest_path in output_directory.glob("*.json"):
     if (
         manifest.get("status") == "COMPLETE"
         and manifest.get("model_path") == model_path
+        and manifest.get("input_batch_size") == batch_size
     ):
         raise SystemExit(0)
 raise SystemExit(1)
@@ -258,8 +267,12 @@ done
     die "BACKEND must be cpu, cuda, or tpu"
 [[ "$NUMBER_OF_CYCLES" =~ ^[1-9][0-9]*$ ]] ||
     die "NUMBER_OF_CYCLES must be a positive integer"
-[[ "$BATCH_SIZE" =~ ^[1-9][0-9]*$ ]] ||
-    die "BATCH_SIZE must be a positive integer"
+[[ -z "$BATCH_SIZE" || "$BATCH_SIZE" =~ ^[1-9][0-9]*$ ]] ||
+    die "BATCH_SIZE must be a positive integer when set"
+[[ "$LINEAR_CONV_BATCH_SIZE" =~ ^[1-9][0-9]*$ ]] ||
+    die "LINEAR_CONV_BATCH_SIZE must be a positive integer"
+[[ "$NETWORK_BATCH_SIZE" =~ ^[1-9][0-9]*$ ]] ||
+    die "NETWORK_BATCH_SIZE must be a positive integer"
 [[ "$RESNET18_IMAGE_SIZE" =~ ^[3-9][0-9]*$ || "$RESNET18_IMAGE_SIZE" =~ ^[1-9][0-9]{2,}$ ]] ||
     die "RESNET18_IMAGE_SIZE must be an integer of at least 32"
 [[ "$RESNET18_NUM_CLASSES" =~ ^[1-9][0-9]*$ ]] ||
@@ -359,7 +372,6 @@ COMMON_ARGS=(
     --output-directory "$OUTPUT_DIRECTORY"
     --shunt-ohms "$SHUNT_OHMS"
     --max-expected-current-a "$MAX_EXPECTED_CURRENT_A"
-    --batch-size "$BATCH_SIZE"
     --number_of_cycles "$NUMBER_OF_CYCLES"
     --sleep_time "$SLEEP_TIME"
     --target_burst_seconds "$TARGET_BURST_SECONDS"
@@ -415,6 +427,8 @@ total=$((linear_total + conv_total + lenet_total + resnet18_total))
 printf 'Board label: %s\n' "$BOARD_LABEL"
 printf 'Suite: %s (%d Linear, %d Conv, %d LeNet, %d ResNet-18, %d total)\n' \
     "$SUITE" "$linear_total" "$conv_total" "$lenet_total" "$resnet18_total" "$total"
+printf 'Batch sizes: Linear/Conv=%s; LeNet/ResNet-18=%s\n' \
+    "$LINEAR_CONV_BATCH_SIZE" "$NETWORK_BATCH_SIZE"
 printf 'Results: %s\n' "$OUTPUT_DIRECTORY"
 ((DRY_RUN == 0)) || printf 'Mode: dry-run (no measurements will start)\n'
 
@@ -440,18 +454,19 @@ trap handle_interrupt INT
 
 run_experiment() {
     local model_path="$1"
+    local batch_size="$2"
     local model_name="${model_path##*/}"
     local model_stem="${model_name%.*}"
     local log_path="${LOG_DIRECTORY}/${model_stem}.log"
     local timestamp
     local exit_code
     local -a pipeline_status
-    local -a command=("${COMMON_ARGS[@]}" --model "$model_path")
+    local -a command=("${COMMON_ARGS[@]}" --batch-size "$batch_size" --model "$model_path")
 
     attempted=$((attempted + 1))
     printf '[%d/%d] %s\n' "$attempted" "$total" "$model_path"
 
-    if ((REPEAT_COMPLETED == 0)) && manifest_exists_for_model "$model_path"; then
+    if ((REPEAT_COMPLETED == 0)) && manifest_exists_for_model "$model_path" "$batch_size"; then
         skipped=$((skipped + 1))
         printf '  skipped: COMPLETE manifest already exists\n'
         return 0
@@ -517,7 +532,8 @@ if [[ "$SUITE" == "linear" || "$SUITE" == "all" ]]; then
     for input_size in "${LINEAR_SIZE_LIST[@]}"; do
         for output_size in "${LINEAR_SIZE_LIST[@]}"; do
             run_experiment \
-                "${LINEAR_MODEL_DIRECTORY}/Linear_${input_size}_${output_size}${MODEL_SUFFIX}"
+                "${LINEAR_MODEL_DIRECTORY}/Linear_${input_size}_${output_size}${MODEL_SUFFIX}" \
+                "$LINEAR_CONV_BATCH_SIZE"
         done
     done
 fi
@@ -529,23 +545,24 @@ if [[ "$SUITE" == "conv" || "$SUITE" == "all" ]]; then
         for input_channels in "${CONV_INPUT_CHANNEL_LIST[@]}"; do
             for image_size in "${CONV_IMAGE_SIZE_LIST[@]}"; do
                 run_experiment \
-                    "${CONV_MODEL_DIRECTORY}/Conv_${input_channels}_${image_size}_${kernel_size}_${padding}${MODEL_SUFFIX}"
+                    "${CONV_MODEL_DIRECTORY}/Conv_${input_channels}_${image_size}_${kernel_size}_${padding}${MODEL_SUFFIX}" \
+                    "$LINEAR_CONV_BATCH_SIZE"
             done
         done
     done
 fi
 
 if [[ "$SUITE" == "lenet" || "$SUITE" == "all" ]]; then
-    run_experiment "$LENET_MODEL_PATH"
+    run_experiment "$LENET_MODEL_PATH" "$NETWORK_BATCH_SIZE"
     for model_path in "${LENET_COMPONENT_MODELS[@]}"; do
-        run_experiment "$model_path"
+        run_experiment "$model_path" "$NETWORK_BATCH_SIZE"
     done
 fi
 
 if [[ "$SUITE" == "resnet18" || "$SUITE" == "all" ]]; then
-    run_experiment "$RESNET18_MODEL_PATH"
+    run_experiment "$RESNET18_MODEL_PATH" "$NETWORK_BATCH_SIZE"
     for model_path in "${RESNET18_COMPONENT_MODELS[@]}"; do
-        run_experiment "$model_path"
+        run_experiment "$model_path" "$NETWORK_BATCH_SIZE"
     done
 fi
 
