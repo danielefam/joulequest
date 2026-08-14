@@ -131,6 +131,12 @@ class TorchRunnerLegacyCompatibilityTests(unittest.TestCase):
                 (1, 10),
             ),
             (
+                "ResNet50_32_10.pt",
+                {"type": "resnet50", "image_size": 32, "num_classes": 10},
+                (1, 3, 32, 32),
+                (1, 10),
+            ),
+            (
                 "ResNetConv_3_64_32_7_2_3.pt",
                 {
                     "type": "resnetconv",
@@ -203,6 +209,7 @@ class TorchRunnerLegacyCompatibilityTests(unittest.TestCase):
             ("rElU_1_8.pt", "relu"),
             ("rOtArYaTtEnTiOn_5_8_2.pt", "rotaryattention"),
             ("rEsNeT18_32_10.pt", "resnet18"),
+            ("rEsNeT50_32_10.pt", "resnet50"),
         ]
 
         for model_name, expected_type in cases:

@@ -89,7 +89,7 @@ if _torch_available:
     torch = importlib.import_module("torch")
     nn = torch.nn
     from layers.attention import RotarySelfAttention, SelfAttention
-    from layers.resnet import ResNet18, ResNetResidualAdd
+    from layers.resnet import ResNet18, ResNet50, ResNetResidualAdd
 
     @dataclass(frozen=True)
     class TorchLayerDefinition:
@@ -197,6 +197,21 @@ if _torch_available:
             raise ValueError("ResNet18 image_size and num_classes must be positive")
         return {
             "type": "resnet18",
+            "image_size": params[0],
+            "num_classes": params[1] if len(params) == 2 else 1000,
+        }
+
+    def _parse_resnet50(params, filename):
+        _require_parameter_count(
+            "ResNet50",
+            params,
+            {1, 2},
+            "ResNet50_<image_size>[_<num_classes>]",
+        )
+        if params[0] <= 0 or (len(params) == 2 and params[1] <= 0):
+            raise ValueError("ResNet50 image_size and num_classes must be positive")
+        return {
+            "type": "resnet50",
             "image_size": params[0],
             "num_classes": params[1] if len(params) == 2 else 1000,
         }
@@ -385,6 +400,11 @@ if _torch_available:
         "resnet18": TorchLayerDefinition(
             parse=_parse_resnet18,
             build=lambda params: ResNet18(params["num_classes"]),
+            input_shape=lambda params: (1, 3, params["image_size"], params["image_size"]),
+        ),
+        "resnet50": TorchLayerDefinition(
+            parse=_parse_resnet50,
+            build=lambda params: ResNet50(params["num_classes"]),
             input_shape=lambda params: (1, 3, params["image_size"], params["image_size"]),
         ),
         "resnetconv": TorchLayerDefinition(
