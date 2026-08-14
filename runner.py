@@ -88,6 +88,8 @@ if _tf_available:
 if _torch_available:
     torch = importlib.import_module("torch")
     nn = torch.nn
+    from layers.attention import RotarySelfAttention, SelfAttention
+    from layers.resnet import ResNet18, ResNet50, ResNetResidualAdd
 
     @dataclass(frozen=True)
     class TorchLayerDefinition:
@@ -174,6 +176,130 @@ if _torch_available:
             "num_heads": params[2],
         }
 
+    def _parse_rotary_attention(params, filename):
+        parsed = _parse_attention(params, filename)
+        head_dim = parsed["embed_dim"] // parsed["num_heads"]
+        if parsed["embed_dim"] % parsed["num_heads"] != 0:
+            raise ValueError("RotaryAttention embed_dim must be divisible by num_heads")
+        if head_dim % 2 != 0:
+            raise ValueError("RotaryAttention head dimension must be even")
+        parsed["type"] = "rotaryattention"
+        return parsed
+
+    def _parse_resnet18(params, filename):
+        _require_parameter_count(
+            "ResNet18",
+            params,
+            {1, 2},
+            "ResNet18_<image_size>[_<num_classes>]",
+        )
+        if params[0] <= 0 or (len(params) == 2 and params[1] <= 0):
+            raise ValueError("ResNet18 image_size and num_classes must be positive")
+        return {
+            "type": "resnet18",
+            "image_size": params[0],
+            "num_classes": params[1] if len(params) == 2 else 1000,
+        }
+
+    def _parse_resnet50(params, filename):
+        _require_parameter_count(
+            "ResNet50",
+            params,
+            {1, 2},
+            "ResNet50_<image_size>[_<num_classes>]",
+        )
+        if params[0] <= 0 or (len(params) == 2 and params[1] <= 0):
+            raise ValueError("ResNet50 image_size and num_classes must be positive")
+        return {
+            "type": "resnet50",
+            "image_size": params[0],
+            "num_classes": params[1] if len(params) == 2 else 1000,
+        }
+
+    def _parse_resnet_conv(params, filename):
+        _require_parameter_count(
+            "ResNetConv",
+            params,
+            {6},
+            "ResNetConv_<in_channels>_<out_channels>_<image_size>_"
+            "<kernel_size>_<stride>_<padding>",
+        )
+        if any(value <= 0 for value in params[:5]) or params[5] < 0:
+            raise ValueError("ResNetConv dimensions and stride must be positive")
+        return {
+            "type": "resnetconv",
+            "in_channels": params[0],
+            "out_channels": params[1],
+            "image_size": params[2],
+            "kernel_size": params[3],
+            "stride": params[4],
+            "padding": params[5],
+        }
+
+    def _parse_resnet_batch_norm(params, filename):
+        _require_parameter_count(
+            "ResNetBatchNorm",
+            params,
+            {2},
+            "ResNetBatchNorm_<channels>_<image_size>",
+        )
+        if any(value <= 0 for value in params):
+            raise ValueError("ResNetBatchNorm dimensions must be positive")
+        return {
+            "type": "resnetbatchnorm",
+            "channels": params[0],
+            "image_size": params[1],
+        }
+
+    def _parse_resnet_maxpool(params, filename):
+        _require_parameter_count(
+            "ResNetMaxPool",
+            params,
+            {5},
+            "ResNetMaxPool_<channels>_<image_size>_<kernel_size>_<stride>_<padding>",
+        )
+        if any(value <= 0 for value in params[:4]) or params[4] < 0:
+            raise ValueError("ResNetMaxPool dimensions and stride must be positive")
+        return {
+            "type": "resnetmaxpool",
+            "channels": params[0],
+            "image_size": params[1],
+            "kernel_size": params[2],
+            "stride": params[3],
+            "padding": params[4],
+        }
+
+    def _parse_resnet_residual_add(params, filename):
+        _require_parameter_count(
+            "ResNetResidualAdd",
+            params,
+            {2},
+            "ResNetResidualAdd_<channels>_<image_size>",
+        )
+        if any(value <= 0 for value in params):
+            raise ValueError("ResNetResidualAdd dimensions must be positive")
+        return {
+            "type": "resnetresidualadd",
+            "channels": params[0],
+            "image_size": params[1],
+        }
+
+    def _parse_resnet_avgpool(params, filename):
+        _require_parameter_count(
+            "ResNetAvgPool",
+            params,
+            {3},
+            "ResNetAvgPool_<channels>_<image_size>_<output_size>",
+        )
+        if any(value <= 0 for value in params):
+            raise ValueError("ResNetAvgPool dimensions must be positive")
+        return {
+            "type": "resnetavgpool",
+            "channels": params[0],
+            "image_size": params[1],
+            "output_size": params[2],
+        }
+
     def _parse_activation(layer_type):
         def parse(params, filename):
             if not params or any(dimension <= 0 for dimension in params):
@@ -183,21 +309,6 @@ if _torch_available:
             return {"type": layer_type, "input_shape": tuple(params)}
 
         return parse
-
-    class SelfAttention(nn.Module):
-        """Unary self-attention layer for the common query/key/value input."""
-
-        def __init__(self, embed_dim, num_heads):
-            super().__init__()
-            self.attention = nn.MultiheadAttention(embed_dim, num_heads)
-
-        def forward(self, inputs):
-            return self.attention(
-                inputs,
-                inputs,
-                inputs,
-                need_weights=False,
-            )[0]
 
     # To add a filename-defined layer, register its parser, module factory, and
     # input-shape function here. TorchRunner itself does not need another branch.
@@ -272,6 +383,89 @@ if _torch_available:
                 params["input_token"],
                 1,
                 params["embed_dim"],
+            ),
+        ),
+        "rotaryattention": TorchLayerDefinition(
+            parse=_parse_rotary_attention,
+            build=lambda params: RotarySelfAttention(
+                params["embed_dim"],
+                params["num_heads"],
+            ),
+            input_shape=lambda params: (
+                params["input_token"],
+                1,
+                params["embed_dim"],
+            ),
+        ),
+        "resnet18": TorchLayerDefinition(
+            parse=_parse_resnet18,
+            build=lambda params: ResNet18(params["num_classes"]),
+            input_shape=lambda params: (1, 3, params["image_size"], params["image_size"]),
+        ),
+        "resnet50": TorchLayerDefinition(
+            parse=_parse_resnet50,
+            build=lambda params: ResNet50(params["num_classes"]),
+            input_shape=lambda params: (1, 3, params["image_size"], params["image_size"]),
+        ),
+        "resnetconv": TorchLayerDefinition(
+            parse=_parse_resnet_conv,
+            build=lambda params: nn.Conv2d(
+                params["in_channels"],
+                params["out_channels"],
+                kernel_size=params["kernel_size"],
+                stride=params["stride"],
+                padding=params["padding"],
+                bias=False,
+            ),
+            input_shape=lambda params: (
+                1,
+                params["in_channels"],
+                params["image_size"],
+                params["image_size"],
+            ),
+        ),
+        "resnetbatchnorm": TorchLayerDefinition(
+            parse=_parse_resnet_batch_norm,
+            build=lambda params: nn.BatchNorm2d(params["channels"]),
+            input_shape=lambda params: (
+                1,
+                params["channels"],
+                params["image_size"],
+                params["image_size"],
+            ),
+        ),
+        "resnetmaxpool": TorchLayerDefinition(
+            parse=_parse_resnet_maxpool,
+            build=lambda params: nn.MaxPool2d(
+                kernel_size=params["kernel_size"],
+                stride=params["stride"],
+                padding=params["padding"],
+            ),
+            input_shape=lambda params: (
+                1,
+                params["channels"],
+                params["image_size"],
+                params["image_size"],
+            ),
+        ),
+        "resnetresidualadd": TorchLayerDefinition(
+            parse=_parse_resnet_residual_add,
+            build=lambda params: ResNetResidualAdd(),
+            input_shape=lambda params: (
+                1,
+                params["channels"],
+                params["image_size"],
+                params["image_size"],
+            ),
+        ),
+        "resnetavgpool": TorchLayerDefinition(
+            parse=_parse_resnet_avgpool,
+            build=lambda params: nn.AdaptiveAvgPool2d(params["output_size"]),
+            input_shape=lambda params: (
+                1,
+                params["channels"],
+                params["image_size"],
+                params["image_size"],
             ),
         ),
         "relu": TorchLayerDefinition(
@@ -376,7 +570,11 @@ if _torch_available:
             with torch.inference_mode():
                 definition = TORCH_LAYER_DEFINITIONS[self.params["type"]]
                 shape = list(definition.input_shape(self.params))
-                batch_axis = 1 if self.params["type"] == "attention" else 0
+                batch_axis = (
+                    1
+                    if self.params["type"] in {"attention", "rotaryattention"}
+                    else 0
+                )
                 shape[batch_axis] = self.batch_size
                 self.input_data = torch.randn(
                     *shape,

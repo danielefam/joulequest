@@ -25,9 +25,17 @@ LENET_MODEL_PATH="${LENET_MODEL_PATH:-${LENET_MODEL_DIRECTORY}/Lenet${MODEL_SUFF
 POOL_MODEL_DIRECTORY="${POOL_MODEL_DIRECTORY:-${MODEL_ROOT}/Pool}"
 RELU_MODEL_DIRECTORY="${RELU_MODEL_DIRECTORY:-${MODEL_ROOT}/ReLU}"
 FLATTEN_MODEL_DIRECTORY="${FLATTEN_MODEL_DIRECTORY:-${MODEL_ROOT}/Flatten}"
+RESNET18_MODEL_DIRECTORY="${RESNET18_MODEL_DIRECTORY:-${MODEL_ROOT}/ResNet18}"
+RESNET18_MODEL_PATH="${RESNET18_MODEL_PATH:-${RESNET18_MODEL_DIRECTORY}/ResNet18_${RESNET18_IMAGE_SIZE:-224}_${RESNET18_NUM_CLASSES:-1000}${MODEL_SUFFIX}}"
+RESNET50_MODEL_DIRECTORY="${RESNET50_MODEL_DIRECTORY:-${MODEL_ROOT}/ResNet50}"
+RESNET50_MODEL_PATH="${RESNET50_MODEL_PATH:-${RESNET50_MODEL_DIRECTORY}/ResNet50_${RESNET50_IMAGE_SIZE:-224}_${RESNET50_NUM_CLASSES:-1000}${MODEL_SUFFIX}}"
 
 NUMBER_OF_CYCLES="${NUMBER_OF_CYCLES:-100}"
-BATCH_SIZE="${BATCH_SIZE:-1}"
+# BATCH_SIZE remains a compatibility override when the two suite-specific
+# values are not supplied. The default campaign uses batch 1 for every suite.
+BATCH_SIZE="${BATCH_SIZE:-}"
+LINEAR_CONV_BATCH_SIZE="${LINEAR_CONV_BATCH_SIZE:-${BATCH_SIZE:-1}}"
+NETWORK_BATCH_SIZE="${NETWORK_BATCH_SIZE:-${BATCH_SIZE:-1}}"
 SLEEP_TIME="${SLEEP_TIME:-3}"
 TARGET_BURST_SECONDS="${TARGET_BURST_SECONDS:-0}"
 SAMPLING_RATE_HZ="${SAMPLING_RATE_HZ:-100}"
@@ -63,12 +71,13 @@ LINEAR_SIZES="${LINEAR_SIZES:-64 128 256 512 1024 2048 4096 8192}"
 # columns. Filenames deliberately use the runner convention:
 # Conv_<input_channels>_<image_size>_<kernel_size>_<padding>.pt
 CONV_INPUT_CHANNELS="${CONV_INPUT_CHANNELS:-1 2 4 8 16 32 64 128 256 512}"
+CONV_OUTPUT_CHANNELS="${CONV_OUTPUT_CHANNELS:-1 8 16 32 64 128 256 512}"
 CONV_IMAGE_SIZES="${CONV_IMAGE_SIZES:-32 64 128 256 512 1024}"
 CONV_KERNEL_PADDING="${CONV_KERNEL_PADDING:-3:0 3:1 5:0 5:1}"
 
 # Ordered standalone operations in TorchRunner's LeNet definition. The first
 # dimension of ReLU and Flatten models is the batch dimension and is replaced
-# by BATCH_SIZE by the runner.
+# by NETWORK_BATCH_SIZE by the runner.
 LENET_COMPONENT_MODELS=(
     "${CONV_MODEL_DIRECTORY}/Conv_1_32_5_0_8${MODEL_SUFFIX}"
     "${POOL_MODEL_DIRECTORY}/MaxPool_8_28_2${MODEL_SUFFIX}"
@@ -81,6 +90,119 @@ LENET_COMPONENT_MODELS=(
     "${LINEAR_MODEL_DIRECTORY}/Linear_512_128${MODEL_SUFFIX}"
     "${RELU_MODEL_DIRECTORY}/ReLU_1_128${MODEL_SUFFIX}"
     "${LINEAR_MODEL_DIRECTORY}/Linear_128_64${MODEL_SUFFIX}"
+)
+
+# ResNet-18 uses the standard [2, 2, 2, 2] basic-block layout. This list contains
+# each distinct shape-specific operation once; repeat counts are part of the graph.
+RESNET18_IMAGE_SIZE="${RESNET18_IMAGE_SIZE:-224}"
+RESNET18_NUM_CLASSES="${RESNET18_NUM_CLASSES:-1000}"
+RESNET50_IMAGE_SIZE="${RESNET50_IMAGE_SIZE:-224}"
+RESNET50_NUM_CLASSES="${RESNET50_NUM_CLASSES:-1000}"
+RESNET_STEM_SIZE=$(((RESNET18_IMAGE_SIZE + 1) / 2))
+RESNET_STAGE1_SIZE=$(((RESNET_STEM_SIZE + 1) / 2))
+RESNET_STAGE2_SIZE=$(((RESNET_STAGE1_SIZE + 1) / 2))
+RESNET_STAGE3_SIZE=$(((RESNET_STAGE2_SIZE + 1) / 2))
+RESNET_STAGE4_SIZE=$(((RESNET_STAGE3_SIZE + 1) / 2))
+RESNET18_COMPONENT_MODELS=(
+    "${RESNET18_MODEL_DIRECTORY}/ResNetConv_3_64_${RESNET18_IMAGE_SIZE}_7_2_3${MODEL_SUFFIX}"
+    "${RESNET18_MODEL_DIRECTORY}/ResNetBatchNorm_64_${RESNET_STEM_SIZE}${MODEL_SUFFIX}"
+    "${RELU_MODEL_DIRECTORY}/ReLU_1_64_${RESNET_STEM_SIZE}_${RESNET_STEM_SIZE}${MODEL_SUFFIX}"
+    "${RESNET18_MODEL_DIRECTORY}/ResNetMaxPool_64_${RESNET_STEM_SIZE}_3_2_1${MODEL_SUFFIX}"
+    "${RESNET18_MODEL_DIRECTORY}/ResNetConv_64_64_${RESNET_STAGE1_SIZE}_3_1_1${MODEL_SUFFIX}"
+    "${RESNET18_MODEL_DIRECTORY}/ResNetBatchNorm_64_${RESNET_STAGE1_SIZE}${MODEL_SUFFIX}"
+    "${RELU_MODEL_DIRECTORY}/ReLU_1_64_${RESNET_STAGE1_SIZE}_${RESNET_STAGE1_SIZE}${MODEL_SUFFIX}"
+    "${RESNET18_MODEL_DIRECTORY}/ResNetResidualAdd_64_${RESNET_STAGE1_SIZE}${MODEL_SUFFIX}"
+    "${RESNET18_MODEL_DIRECTORY}/ResNetConv_64_128_${RESNET_STAGE1_SIZE}_3_2_1${MODEL_SUFFIX}"
+    "${RESNET18_MODEL_DIRECTORY}/ResNetConv_64_128_${RESNET_STAGE1_SIZE}_1_2_0${MODEL_SUFFIX}"
+    "${RESNET18_MODEL_DIRECTORY}/ResNetBatchNorm_128_${RESNET_STAGE2_SIZE}${MODEL_SUFFIX}"
+    "${RESNET18_MODEL_DIRECTORY}/ResNetConv_128_128_${RESNET_STAGE2_SIZE}_3_1_1${MODEL_SUFFIX}"
+    "${RELU_MODEL_DIRECTORY}/ReLU_1_128_${RESNET_STAGE2_SIZE}_${RESNET_STAGE2_SIZE}${MODEL_SUFFIX}"
+    "${RESNET18_MODEL_DIRECTORY}/ResNetResidualAdd_128_${RESNET_STAGE2_SIZE}${MODEL_SUFFIX}"
+    "${RESNET18_MODEL_DIRECTORY}/ResNetConv_128_256_${RESNET_STAGE2_SIZE}_3_2_1${MODEL_SUFFIX}"
+    "${RESNET18_MODEL_DIRECTORY}/ResNetConv_128_256_${RESNET_STAGE2_SIZE}_1_2_0${MODEL_SUFFIX}"
+    "${RESNET18_MODEL_DIRECTORY}/ResNetBatchNorm_256_${RESNET_STAGE3_SIZE}${MODEL_SUFFIX}"
+    "${RESNET18_MODEL_DIRECTORY}/ResNetConv_256_256_${RESNET_STAGE3_SIZE}_3_1_1${MODEL_SUFFIX}"
+    "${RELU_MODEL_DIRECTORY}/ReLU_1_256_${RESNET_STAGE3_SIZE}_${RESNET_STAGE3_SIZE}${MODEL_SUFFIX}"
+    "${RESNET18_MODEL_DIRECTORY}/ResNetResidualAdd_256_${RESNET_STAGE3_SIZE}${MODEL_SUFFIX}"
+    "${RESNET18_MODEL_DIRECTORY}/ResNetConv_256_512_${RESNET_STAGE3_SIZE}_3_2_1${MODEL_SUFFIX}"
+    "${RESNET18_MODEL_DIRECTORY}/ResNetConv_256_512_${RESNET_STAGE3_SIZE}_1_2_0${MODEL_SUFFIX}"
+    "${RESNET18_MODEL_DIRECTORY}/ResNetBatchNorm_512_${RESNET_STAGE4_SIZE}${MODEL_SUFFIX}"
+    "${RESNET18_MODEL_DIRECTORY}/ResNetConv_512_512_${RESNET_STAGE4_SIZE}_3_1_1${MODEL_SUFFIX}"
+    "${RELU_MODEL_DIRECTORY}/ReLU_1_512_${RESNET_STAGE4_SIZE}_${RESNET_STAGE4_SIZE}${MODEL_SUFFIX}"
+    "${RESNET18_MODEL_DIRECTORY}/ResNetResidualAdd_512_${RESNET_STAGE4_SIZE}${MODEL_SUFFIX}"
+    "${RESNET18_MODEL_DIRECTORY}/ResNetAvgPool_512_${RESNET_STAGE4_SIZE}_1${MODEL_SUFFIX}"
+    "${FLATTEN_MODEL_DIRECTORY}/Flatten_1_512_1_1${MODEL_SUFFIX}"
+    "${LINEAR_MODEL_DIRECTORY}/Linear_512_${RESNET18_NUM_CLASSES}${MODEL_SUFFIX}"
+)
+
+# ResNet-50 uses the standard [3, 4, 6, 3] bottleneck layout. As with ResNet-18,
+# each distinct shape-specific operation is measured once.
+RESNET50_STEM_SIZE=$(((RESNET50_IMAGE_SIZE + 1) / 2))
+RESNET50_STAGE1_SIZE=$(((RESNET50_STEM_SIZE + 1) / 2))
+RESNET50_STAGE2_SIZE=$(((RESNET50_STAGE1_SIZE + 1) / 2))
+RESNET50_STAGE3_SIZE=$(((RESNET50_STAGE2_SIZE + 1) / 2))
+RESNET50_STAGE4_SIZE=$(((RESNET50_STAGE3_SIZE + 1) / 2))
+RESNET50_COMPONENT_MODELS=(
+    "${RESNET50_MODEL_DIRECTORY}/ResNetConv_3_64_${RESNET50_IMAGE_SIZE}_7_2_3${MODEL_SUFFIX}"
+    "${RESNET50_MODEL_DIRECTORY}/ResNetBatchNorm_64_${RESNET50_STEM_SIZE}${MODEL_SUFFIX}"
+    "${RELU_MODEL_DIRECTORY}/ReLU_1_64_${RESNET50_STEM_SIZE}_${RESNET50_STEM_SIZE}${MODEL_SUFFIX}"
+    "${RESNET50_MODEL_DIRECTORY}/ResNetMaxPool_64_${RESNET50_STEM_SIZE}_3_2_1${MODEL_SUFFIX}"
+
+    "${RESNET50_MODEL_DIRECTORY}/ResNetConv_64_64_${RESNET50_STAGE1_SIZE}_1_1_0${MODEL_SUFFIX}"
+    "${RESNET50_MODEL_DIRECTORY}/ResNetConv_256_64_${RESNET50_STAGE1_SIZE}_1_1_0${MODEL_SUFFIX}"
+    "${RESNET50_MODEL_DIRECTORY}/ResNetConv_64_64_${RESNET50_STAGE1_SIZE}_3_1_1${MODEL_SUFFIX}"
+    "${RESNET50_MODEL_DIRECTORY}/ResNetConv_64_256_${RESNET50_STAGE1_SIZE}_1_1_0${MODEL_SUFFIX}"
+    "${RESNET50_MODEL_DIRECTORY}/ResNetBatchNorm_64_${RESNET50_STAGE1_SIZE}${MODEL_SUFFIX}"
+    "${RELU_MODEL_DIRECTORY}/ReLU_1_64_${RESNET50_STAGE1_SIZE}_${RESNET50_STAGE1_SIZE}${MODEL_SUFFIX}"
+    "${RESNET50_MODEL_DIRECTORY}/ResNetBatchNorm_256_${RESNET50_STAGE1_SIZE}${MODEL_SUFFIX}"
+    "${RESNET50_MODEL_DIRECTORY}/ResNetResidualAdd_256_${RESNET50_STAGE1_SIZE}${MODEL_SUFFIX}"
+    "${RELU_MODEL_DIRECTORY}/ReLU_1_256_${RESNET50_STAGE1_SIZE}_${RESNET50_STAGE1_SIZE}${MODEL_SUFFIX}"
+
+    "${RESNET50_MODEL_DIRECTORY}/ResNetConv_256_128_${RESNET50_STAGE1_SIZE}_1_1_0${MODEL_SUFFIX}"
+    "${RESNET50_MODEL_DIRECTORY}/ResNetBatchNorm_128_${RESNET50_STAGE1_SIZE}${MODEL_SUFFIX}"
+    "${RELU_MODEL_DIRECTORY}/ReLU_1_128_${RESNET50_STAGE1_SIZE}_${RESNET50_STAGE1_SIZE}${MODEL_SUFFIX}"
+    "${RESNET50_MODEL_DIRECTORY}/ResNetConv_128_128_${RESNET50_STAGE1_SIZE}_3_2_1${MODEL_SUFFIX}"
+    "${RESNET50_MODEL_DIRECTORY}/ResNetConv_256_512_${RESNET50_STAGE1_SIZE}_1_2_0${MODEL_SUFFIX}"
+    "${RESNET50_MODEL_DIRECTORY}/ResNetBatchNorm_128_${RESNET50_STAGE2_SIZE}${MODEL_SUFFIX}"
+    "${RELU_MODEL_DIRECTORY}/ReLU_1_128_${RESNET50_STAGE2_SIZE}_${RESNET50_STAGE2_SIZE}${MODEL_SUFFIX}"
+    "${RESNET50_MODEL_DIRECTORY}/ResNetConv_128_512_${RESNET50_STAGE2_SIZE}_1_1_0${MODEL_SUFFIX}"
+    "${RESNET50_MODEL_DIRECTORY}/ResNetConv_512_128_${RESNET50_STAGE2_SIZE}_1_1_0${MODEL_SUFFIX}"
+    "${RESNET50_MODEL_DIRECTORY}/ResNetConv_128_128_${RESNET50_STAGE2_SIZE}_3_1_1${MODEL_SUFFIX}"
+    "${RESNET50_MODEL_DIRECTORY}/ResNetBatchNorm_512_${RESNET50_STAGE2_SIZE}${MODEL_SUFFIX}"
+    "${RESNET50_MODEL_DIRECTORY}/ResNetResidualAdd_512_${RESNET50_STAGE2_SIZE}${MODEL_SUFFIX}"
+    "${RELU_MODEL_DIRECTORY}/ReLU_1_512_${RESNET50_STAGE2_SIZE}_${RESNET50_STAGE2_SIZE}${MODEL_SUFFIX}"
+
+    "${RESNET50_MODEL_DIRECTORY}/ResNetConv_512_256_${RESNET50_STAGE2_SIZE}_1_1_0${MODEL_SUFFIX}"
+    "${RESNET50_MODEL_DIRECTORY}/ResNetBatchNorm_256_${RESNET50_STAGE2_SIZE}${MODEL_SUFFIX}"
+    "${RELU_MODEL_DIRECTORY}/ReLU_1_256_${RESNET50_STAGE2_SIZE}_${RESNET50_STAGE2_SIZE}${MODEL_SUFFIX}"
+    "${RESNET50_MODEL_DIRECTORY}/ResNetConv_256_256_${RESNET50_STAGE2_SIZE}_3_2_1${MODEL_SUFFIX}"
+    "${RESNET50_MODEL_DIRECTORY}/ResNetConv_512_1024_${RESNET50_STAGE2_SIZE}_1_2_0${MODEL_SUFFIX}"
+    "${RESNET50_MODEL_DIRECTORY}/ResNetBatchNorm_256_${RESNET50_STAGE3_SIZE}${MODEL_SUFFIX}"
+    "${RELU_MODEL_DIRECTORY}/ReLU_1_256_${RESNET50_STAGE3_SIZE}_${RESNET50_STAGE3_SIZE}${MODEL_SUFFIX}"
+    "${RESNET50_MODEL_DIRECTORY}/ResNetConv_256_1024_${RESNET50_STAGE3_SIZE}_1_1_0${MODEL_SUFFIX}"
+    "${RESNET50_MODEL_DIRECTORY}/ResNetConv_1024_256_${RESNET50_STAGE3_SIZE}_1_1_0${MODEL_SUFFIX}"
+    "${RESNET50_MODEL_DIRECTORY}/ResNetConv_256_256_${RESNET50_STAGE3_SIZE}_3_1_1${MODEL_SUFFIX}"
+    "${RESNET50_MODEL_DIRECTORY}/ResNetBatchNorm_1024_${RESNET50_STAGE3_SIZE}${MODEL_SUFFIX}"
+    "${RESNET50_MODEL_DIRECTORY}/ResNetResidualAdd_1024_${RESNET50_STAGE3_SIZE}${MODEL_SUFFIX}"
+    "${RELU_MODEL_DIRECTORY}/ReLU_1_1024_${RESNET50_STAGE3_SIZE}_${RESNET50_STAGE3_SIZE}${MODEL_SUFFIX}"
+
+    "${RESNET50_MODEL_DIRECTORY}/ResNetConv_1024_512_${RESNET50_STAGE3_SIZE}_1_1_0${MODEL_SUFFIX}"
+    "${RESNET50_MODEL_DIRECTORY}/ResNetBatchNorm_512_${RESNET50_STAGE3_SIZE}${MODEL_SUFFIX}"
+    "${RELU_MODEL_DIRECTORY}/ReLU_1_512_${RESNET50_STAGE3_SIZE}_${RESNET50_STAGE3_SIZE}${MODEL_SUFFIX}"
+    "${RESNET50_MODEL_DIRECTORY}/ResNetConv_512_512_${RESNET50_STAGE3_SIZE}_3_2_1${MODEL_SUFFIX}"
+    "${RESNET50_MODEL_DIRECTORY}/ResNetConv_1024_2048_${RESNET50_STAGE3_SIZE}_1_2_0${MODEL_SUFFIX}"
+    "${RESNET50_MODEL_DIRECTORY}/ResNetBatchNorm_512_${RESNET50_STAGE4_SIZE}${MODEL_SUFFIX}"
+    "${RELU_MODEL_DIRECTORY}/ReLU_1_512_${RESNET50_STAGE4_SIZE}_${RESNET50_STAGE4_SIZE}${MODEL_SUFFIX}"
+    "${RESNET50_MODEL_DIRECTORY}/ResNetConv_512_2048_${RESNET50_STAGE4_SIZE}_1_1_0${MODEL_SUFFIX}"
+    "${RESNET50_MODEL_DIRECTORY}/ResNetConv_2048_512_${RESNET50_STAGE4_SIZE}_1_1_0${MODEL_SUFFIX}"
+    "${RESNET50_MODEL_DIRECTORY}/ResNetConv_512_512_${RESNET50_STAGE4_SIZE}_3_1_1${MODEL_SUFFIX}"
+    "${RESNET50_MODEL_DIRECTORY}/ResNetBatchNorm_2048_${RESNET50_STAGE4_SIZE}${MODEL_SUFFIX}"
+    "${RESNET50_MODEL_DIRECTORY}/ResNetResidualAdd_2048_${RESNET50_STAGE4_SIZE}${MODEL_SUFFIX}"
+    "${RELU_MODEL_DIRECTORY}/ReLU_1_2048_${RESNET50_STAGE4_SIZE}_${RESNET50_STAGE4_SIZE}${MODEL_SUFFIX}"
+
+    "${RESNET50_MODEL_DIRECTORY}/ResNetAvgPool_2048_${RESNET50_STAGE4_SIZE}_1${MODEL_SUFFIX}"
+    "${FLATTEN_MODEL_DIRECTORY}/Flatten_1_2048_1_1${MODEL_SUFFIX}"
+    "${LINEAR_MODEL_DIRECTORY}/Linear_2048_${RESNET50_NUM_CLASSES}${MODEL_SUFFIX}"
 )
 
 # Set REPEAT_COMPLETED=1 to rerun models that already have a COMPLETE manifest
@@ -96,8 +218,9 @@ Usage:
 
 Options:
   --board LABEL       Safe label used only for the local result directory.
-    --suite SUITE       linear, conv, lenet, or all (default: all). The lenet
-                                            suite includes LeNet and every operation in its graph.
+        --suite SUITE       linear, conv, lenet, resnet18, resnet50, or all (default: all).
+                                                The lenet and ResNet suites include each architecture
+                                                and every distinct shape-specific operation in its graph.
   --dry-run           Print commands without running measurements.
   --continue-on-error Continue after an experiment exits nonzero.
   --repeat-completed  Rerun experiments with an existing COMPLETE manifest.
@@ -110,11 +233,12 @@ the script finishes, then invoke it again with a new BOARD_LABEL/configuration.
 
 Examples:
   ./run_measurement_campaign.sh --board jetson_nano --suite all
-    ./run_measurement_campaign.sh --board jetson_nano --suite lenet
+    ./run_measurement_campaign.sh --board jetson_nano --suite resnet18
   ./run_measurement_campaign.sh --board pi5 --suite linear --dry-run
 
 Override parameters without editing the script:
-    BACKEND=cpu BATCH_SIZE=16 MAX_EXPECTED_CURRENT_A=3.0 \
+    BACKEND=cpu LINEAR_CONV_BATCH_SIZE=16 NETWORK_BATCH_SIZE=8 \
+    MAX_EXPECTED_CURRENT_A=3.0 \
     ./run_measurement_campaign.sh --board pi5 --suite all
 EOF
 }
@@ -141,13 +265,15 @@ print_command() {
 
 manifest_exists_for_model() {
     local model_path="$1"
-    "$PYTHON_BIN" - "$OUTPUT_DIRECTORY" "$model_path" <<'PY'
+    local batch_size="$2"
+    "$PYTHON_BIN" - "$OUTPUT_DIRECTORY" "$model_path" "$batch_size" <<'PY'
 import json
 import sys
 from pathlib import Path
 
 output_directory = Path(sys.argv[1])
 model_path = sys.argv[2]
+batch_size = int(sys.argv[3])
 for manifest_path in output_directory.glob("*.json"):
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -156,6 +282,7 @@ for manifest_path in output_directory.glob("*.json"):
     if (
         manifest.get("status") == "COMPLETE"
         and manifest.get("model_path") == model_path
+        and manifest.get("input_batch_size") == batch_size
     ):
         raise SystemExit(0)
 raise SystemExit(1)
@@ -208,14 +335,26 @@ done
 [[ -n "$BOARD_LABEL" ]] || die "--board is required"
 [[ "$BOARD_LABEL" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] ||
     die "--board may contain only letters, numbers, dot, underscore, and dash"
-[[ "$SUITE" == "linear" || "$SUITE" == "conv" || "$SUITE" == "all" || "$SUITE" == "lenet" ]] ||
-    die "--suite must be linear, conv, lenet or all"
+[[ "$SUITE" == "linear" || "$SUITE" == "conv" || "$SUITE" == "all" || "$SUITE" == "lenet" || "$SUITE" == "resnet18" || "$SUITE" == "resnet50" ]] ||
+    die "--suite must be linear, conv, lenet, resnet18, resnet50 or all"
 [[ "$BACKEND" == "cpu" || "$BACKEND" == "cuda" || "$BACKEND" == "tpu" ]] ||
     die "BACKEND must be cpu, cuda, or tpu"
 [[ "$NUMBER_OF_CYCLES" =~ ^[1-9][0-9]*$ ]] ||
     die "NUMBER_OF_CYCLES must be a positive integer"
-[[ "$BATCH_SIZE" =~ ^[1-9][0-9]*$ ]] ||
-    die "BATCH_SIZE must be a positive integer"
+[[ -z "$BATCH_SIZE" || "$BATCH_SIZE" =~ ^[1-9][0-9]*$ ]] ||
+    die "BATCH_SIZE must be a positive integer when set"
+[[ "$LINEAR_CONV_BATCH_SIZE" =~ ^[1-9][0-9]*$ ]] ||
+    die "LINEAR_CONV_BATCH_SIZE must be a positive integer"
+[[ "$NETWORK_BATCH_SIZE" =~ ^[1-9][0-9]*$ ]] ||
+    die "NETWORK_BATCH_SIZE must be a positive integer"
+[[ "$RESNET18_IMAGE_SIZE" =~ ^[3-9][0-9]*$ || "$RESNET18_IMAGE_SIZE" =~ ^[1-9][0-9]{2,}$ ]] ||
+    die "RESNET18_IMAGE_SIZE must be an integer of at least 32"
+[[ "$RESNET18_NUM_CLASSES" =~ ^[1-9][0-9]*$ ]] ||
+    die "RESNET18_NUM_CLASSES must be a positive integer"
+[[ "$RESNET50_IMAGE_SIZE" =~ ^[3-9][0-9]*$ || "$RESNET50_IMAGE_SIZE" =~ ^[1-9][0-9]{2,}$ ]] ||
+    die "RESNET50_IMAGE_SIZE must be an integer of at least 32"
+[[ "$RESNET50_NUM_CLASSES" =~ ^[1-9][0-9]*$ ]] ||
+    die "RESNET50_NUM_CLASSES must be a positive integer"
 [[ "$MIN_ACTIVE_SAMPLES" =~ ^[1-9][0-9]*$ ]] ||
     die "MIN_ACTIVE_SAMPLES must be a positive integer"
 [[ "$WARMUP_INFERENCES" =~ ^[0-9]+$ ]] ||
@@ -286,11 +425,12 @@ command -v "$PYTHON_BIN" >/dev/null 2>&1 ||
 
 read -r -a LINEAR_SIZE_LIST <<<"$LINEAR_SIZES"
 read -r -a CONV_INPUT_CHANNEL_LIST <<<"$CONV_INPUT_CHANNELS"
+read -r -a CONV_OUTPUT_CHANNEL_LIST <<<"$CONV_OUTPUT_CHANNELS"
 read -r -a CONV_IMAGE_SIZE_LIST <<<"$CONV_IMAGE_SIZES"
 read -r -a CONV_KERNEL_PADDING_LIST <<<"$CONV_KERNEL_PADDING"
 
 for value in "${LINEAR_SIZE_LIST[@]}" "${CONV_INPUT_CHANNEL_LIST[@]}" \
-    "${CONV_IMAGE_SIZE_LIST[@]}"; do
+    "${CONV_OUTPUT_CHANNEL_LIST[@]}" "${CONV_IMAGE_SIZE_LIST[@]}"; do
     [[ "$value" =~ ^[1-9][0-9]*$ ]] ||
         die "matrix values must be positive integers: $value"
 done
@@ -311,7 +451,6 @@ COMMON_ARGS=(
     --output-directory "$OUTPUT_DIRECTORY"
     --shunt-ohms "$SHUNT_OHMS"
     --max-expected-current-a "$MAX_EXPECTED_CURRENT_A"
-    --batch-size "$BATCH_SIZE"
     --number_of_cycles "$NUMBER_OF_CYCLES"
     --sleep_time "$SLEEP_TIME"
     --target_burst_seconds "$TARGET_BURST_SECONDS"
@@ -349,20 +488,30 @@ fi
 linear_total=0
 conv_total=0
 lenet_total=0
+resnet18_total=0
+resnet50_total=0
 if [[ "$SUITE" == "linear" || "$SUITE" == "all" ]]; then
     linear_total=$((${#LINEAR_SIZE_LIST[@]} * ${#LINEAR_SIZE_LIST[@]}))
 fi
 if [[ "$SUITE" == "conv" || "$SUITE" == "all" ]]; then
-    conv_total=$((${#CONV_INPUT_CHANNEL_LIST[@]} * ${#CONV_IMAGE_SIZE_LIST[@]} * ${#CONV_KERNEL_PADDING_LIST[@]}))
+    conv_total=$((${#CONV_INPUT_CHANNEL_LIST[@]} * ${#CONV_OUTPUT_CHANNEL_LIST[@]} * ${#CONV_IMAGE_SIZE_LIST[@]} * ${#CONV_KERNEL_PADDING_LIST[@]}))
 fi
 if [[ "$SUITE" == "lenet" || "$SUITE" == "all" ]]; then
     lenet_total=$((1 + ${#LENET_COMPONENT_MODELS[@]}))
 fi
-total=$((linear_total + conv_total + lenet_total))
+if [[ "$SUITE" == "resnet18" || "$SUITE" == "all" ]]; then
+    resnet18_total=$((1 + ${#RESNET18_COMPONENT_MODELS[@]}))
+fi
+if [[ "$SUITE" == "resnet50" || "$SUITE" == "all" ]]; then
+    resnet50_total=$((1 + ${#RESNET50_COMPONENT_MODELS[@]}))
+fi
+total=$((linear_total + conv_total + lenet_total + resnet18_total + resnet50_total))
 
 printf 'Board label: %s\n' "$BOARD_LABEL"
-printf 'Suite: %s (%d Linear, %d Conv, %d LeNet, %d total)\n' \
-    "$SUITE" "$linear_total" "$conv_total" "$lenet_total" "$total"
+printf 'Suite: %s (%d Linear, %d Conv, %d LeNet, %d ResNet-18, %d ResNet-50, %d total)\n' \
+    "$SUITE" "$linear_total" "$conv_total" "$lenet_total" "$resnet18_total" "$resnet50_total" "$total"
+printf 'Batch sizes: Linear/Conv=%s; LeNet/ResNet-18=%s; ResNet-50=1\n' \
+    "$LINEAR_CONV_BATCH_SIZE" "$NETWORK_BATCH_SIZE"
 printf 'Results: %s\n' "$OUTPUT_DIRECTORY"
 ((DRY_RUN == 0)) || printf 'Mode: dry-run (no measurements will start)\n'
 
@@ -388,18 +537,19 @@ trap handle_interrupt INT
 
 run_experiment() {
     local model_path="$1"
+    local batch_size="$2"
     local model_name="${model_path##*/}"
     local model_stem="${model_name%.*}"
     local log_path="${LOG_DIRECTORY}/${model_stem}.log"
     local timestamp
     local exit_code
     local -a pipeline_status
-    local -a command=("${COMMON_ARGS[@]}" --model "$model_path")
+    local -a command=("${COMMON_ARGS[@]}" --batch-size "$batch_size" --model "$model_path")
 
     attempted=$((attempted + 1))
     printf '[%d/%d] %s\n' "$attempted" "$total" "$model_path"
 
-    if ((REPEAT_COMPLETED == 0)) && manifest_exists_for_model "$model_path"; then
+    if ((REPEAT_COMPLETED == 0)) && manifest_exists_for_model "$model_path" "$batch_size"; then
         skipped=$((skipped + 1))
         printf '  skipped: COMPLETE manifest already exists\n'
         return 0
@@ -465,7 +615,8 @@ if [[ "$SUITE" == "linear" || "$SUITE" == "all" ]]; then
     for input_size in "${LINEAR_SIZE_LIST[@]}"; do
         for output_size in "${LINEAR_SIZE_LIST[@]}"; do
             run_experiment \
-                "${LINEAR_MODEL_DIRECTORY}/Linear_${input_size}_${output_size}${MODEL_SUFFIX}"
+                "${LINEAR_MODEL_DIRECTORY}/Linear_${input_size}_${output_size}${MODEL_SUFFIX}" \
+                "$LINEAR_CONV_BATCH_SIZE"
         done
     done
 fi
@@ -475,18 +626,35 @@ if [[ "$SUITE" == "conv" || "$SUITE" == "all" ]]; then
         kernel_size="${kernel_padding%%:*}"
         padding="${kernel_padding##*:}"
         for input_channels in "${CONV_INPUT_CHANNEL_LIST[@]}"; do
-            for image_size in "${CONV_IMAGE_SIZE_LIST[@]}"; do
-                run_experiment \
-                    "${CONV_MODEL_DIRECTORY}/Conv_${input_channels}_${image_size}_${kernel_size}_${padding}${MODEL_SUFFIX}"
+            for output_channels in "${CONV_OUTPUT_CHANNEL_LIST[@]}"; do
+                for image_size in "${CONV_IMAGE_SIZE_LIST[@]}"; do
+                    run_experiment \
+                        "${CONV_MODEL_DIRECTORY}/Conv_${input_channels}_${image_size}_${kernel_size}_${padding}_${output_channels}${MODEL_SUFFIX}" \
+                        "$LINEAR_CONV_BATCH_SIZE"
+                done
             done
         done
     done
 fi
 
 if [[ "$SUITE" == "lenet" || "$SUITE" == "all" ]]; then
-    run_experiment "$LENET_MODEL_PATH"
+    run_experiment "$LENET_MODEL_PATH" "$NETWORK_BATCH_SIZE"
     for model_path in "${LENET_COMPONENT_MODELS[@]}"; do
-        run_experiment "$model_path"
+        run_experiment "$model_path" "$NETWORK_BATCH_SIZE"
+    done
+fi
+
+if [[ "$SUITE" == "resnet18" || "$SUITE" == "all" ]]; then
+    run_experiment "$RESNET18_MODEL_PATH" "$NETWORK_BATCH_SIZE"
+    for model_path in "${RESNET18_COMPONENT_MODELS[@]}"; do
+        run_experiment "$model_path" "$NETWORK_BATCH_SIZE"
+    done
+fi
+
+if [[ "$SUITE" == "resnet50" || "$SUITE" == "all" ]]; then
+    run_experiment "$RESNET50_MODEL_PATH" 1
+    for model_path in "${RESNET50_COMPONENT_MODELS[@]}"; do
+        run_experiment "$model_path" 1
     done
 fi
 
