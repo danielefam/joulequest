@@ -70,6 +70,7 @@ LINEAR_SIZES="${LINEAR_SIZES:-64 128 256 512 1024 2048 4096 8192}"
 # columns. Filenames deliberately use the runner convention:
 # Conv_<input_channels>_<image_size>_<kernel_size>_<padding>.pt
 CONV_INPUT_CHANNELS="${CONV_INPUT_CHANNELS:-1 2 4 8 16 32 64 128 256 512}"
+CONV_OUTPUT_CHANNELS="${CONV_OUTPUT_CHANNELS:-1 8 16 32 64 128 256 512}"
 CONV_IMAGE_SIZES="${CONV_IMAGE_SIZES:-32 64 128 256 512 1024}"
 CONV_KERNEL_PADDING="${CONV_KERNEL_PADDING:-3:0 3:1 5:0 5:1}"
 
@@ -347,11 +348,12 @@ command -v "$PYTHON_BIN" >/dev/null 2>&1 ||
 
 read -r -a LINEAR_SIZE_LIST <<<"$LINEAR_SIZES"
 read -r -a CONV_INPUT_CHANNEL_LIST <<<"$CONV_INPUT_CHANNELS"
+read -r -a CONV_OUTPUT_CHANNEL_LIST <<<"$CONV_OUTPUT_CHANNELS"
 read -r -a CONV_IMAGE_SIZE_LIST <<<"$CONV_IMAGE_SIZES"
 read -r -a CONV_KERNEL_PADDING_LIST <<<"$CONV_KERNEL_PADDING"
 
 for value in "${LINEAR_SIZE_LIST[@]}" "${CONV_INPUT_CHANNEL_LIST[@]}" \
-    "${CONV_IMAGE_SIZE_LIST[@]}"; do
+    "${CONV_OUTPUT_CHANNEL_LIST[@]}" "${CONV_IMAGE_SIZE_LIST[@]}"; do
     [[ "$value" =~ ^[1-9][0-9]*$ ]] ||
         die "matrix values must be positive integers: $value"
 done
@@ -414,7 +416,7 @@ if [[ "$SUITE" == "linear" || "$SUITE" == "all" ]]; then
     linear_total=$((${#LINEAR_SIZE_LIST[@]} * ${#LINEAR_SIZE_LIST[@]}))
 fi
 if [[ "$SUITE" == "conv" || "$SUITE" == "all" ]]; then
-    conv_total=$((${#CONV_INPUT_CHANNEL_LIST[@]} * ${#CONV_IMAGE_SIZE_LIST[@]} * ${#CONV_KERNEL_PADDING_LIST[@]}))
+    conv_total=$((${#CONV_INPUT_CHANNEL_LIST[@]} * ${#CONV_OUTPUT_CHANNEL_LIST[@]} * ${#CONV_IMAGE_SIZE_LIST[@]} * ${#CONV_KERNEL_PADDING_LIST[@]}))
 fi
 if [[ "$SUITE" == "lenet" || "$SUITE" == "all" ]]; then
     lenet_total=$((1 + ${#LENET_COMPONENT_MODELS[@]}))
@@ -543,10 +545,12 @@ if [[ "$SUITE" == "conv" || "$SUITE" == "all" ]]; then
         kernel_size="${kernel_padding%%:*}"
         padding="${kernel_padding##*:}"
         for input_channels in "${CONV_INPUT_CHANNEL_LIST[@]}"; do
-            for image_size in "${CONV_IMAGE_SIZE_LIST[@]}"; do
-                run_experiment \
-                    "${CONV_MODEL_DIRECTORY}/Conv_${input_channels}_${image_size}_${kernel_size}_${padding}${MODEL_SUFFIX}" \
-                    "$LINEAR_CONV_BATCH_SIZE"
+            for output_channels in "${CONV_OUTPUT_CHANNEL_LIST[@]}"; do
+                for image_size in "${CONV_IMAGE_SIZE_LIST[@]}"; do
+                    run_experiment \
+                        "${CONV_MODEL_DIRECTORY}/Conv_${input_channels}_${image_size}_${kernel_size}_${padding}_${output_channels}${MODEL_SUFFIX}" \
+                        "$LINEAR_CONV_BATCH_SIZE"
+                done
             done
         done
     done

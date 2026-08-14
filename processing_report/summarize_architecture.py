@@ -53,7 +53,11 @@ RESNET18_OPERATIONS = (
     ("Stage4 ResidualAdd", r"resnetresidualadd_512_7", 2),
     ("AdaptiveAvgPool", r"resnetavgpool_512_7_1", 1),
     ("Flatten", r"flatten_1_512_1_1", 1),
-    ("Linear 512->10", r"linear_512_10", 1),
+    ("Linear 512->classes", r"linear_512_(?:10|1000)", 1),
+)
+RESNET18_FULL_MODEL = re.compile(r"^resnet18_224_(?:10|1000)$", re.IGNORECASE)
+RESNET18_NON_COMPARABLE = frozenset(
+    {"Stem ReLU 64x112", "Stage1 ReLU", "Stage2 ReLU", "Stage3 ReLU", "Stage4 ReLU", "Flatten"}
 )
 
 
@@ -162,23 +166,26 @@ def print_platform(label, path, batches):
 
 
 def load_resnet18_measurements(path, batch=8):
-    patterns = {
-        model_name: (label, count)
-        for label, model_name, count in RESNET18_OPERATIONS
-    }
     selected = {}
     complete = None
     with path.open(newline="", encoding="utf-8") as summary_file:
         for row in csv.DictReader(summary_file):
             if _batch(row) != batch:
                 continue
-            model_name = Path(row.get("model_path", "")).stem.lower()
-            if model_name == "resnet18_224_10":
+            model_name = Path(row.get("model_path", "")).stem
+            if RESNET18_FULL_MODEL.fullmatch(model_name):
                 operation = "ResNet18 complete"
-            elif model_name in patterns:
-                operation = patterns[model_name][0]
             else:
-                continue
+                operation = next(
+                    (
+                        label
+                        for label, pattern, _ in RESNET18_OPERATIONS
+                        if re.fullmatch(pattern, model_name, re.IGNORECASE)
+                    ),
+                    None,
+                )
+                if operation is None:
+                    continue
             try:
                 energy = float(row["energy_mean_mJ"])
             except (KeyError, TypeError, ValueError):
@@ -197,13 +204,15 @@ def load_resnet18_measurements(path, batch=8):
     return selected, complete
 
 
-def print_resnet18(path, batch=8):
+def print_resnet18(path, batch=8, label="Nano"):
     measurements, complete = load_resnet18_measurements(path, batch)
-    print(f"\n=== Nano ResNet18 224x224 batch {batch}: {path} ===")
+    print(f"\n=== {label} ResNet18 224x224 batch {batch}: {path} ===")
     print("module                    count  each_mJ   weighted_mJ  quality")
     print("------------------------  -----  --------  -----------  -------")
     weighted_sum = 0.0
     ok_weighted_sum = 0.0
+    comparable_sum = 0.0
+    comparable_ok_sum = 0.0
     missing = []
     review = []
     for label, _, count in RESNET18_OPERATIONS:
@@ -218,14 +227,29 @@ def print_resnet18(path, batch=8):
             ok_weighted_sum += weighted_energy
         else:
             review.append(label)
+        if label not in RESNET18_NON_COMPARABLE:
+            comparable_sum += weighted_energy
+            if measurement.quality == "OK":
+                comparable_ok_sum += weighted_energy
         print(
             f"{label:<24}  {count:5d}  {measurement.energy_mj:8.6f}  "
             f"{weighted_energy:11.6f}  {measurement.quality:>7}"
         )
 
     total_calls = sum(count for _, _, count in RESNET18_OPERATIONS)
-    print(f"Weighted standalone sum: {weighted_sum:.6f} mJ/sample ({total_calls} module calls)")
-    print(f"Weighted OK-only sum:    {ok_weighted_sum:.6f} mJ/sample")
+    comparable_calls = sum(
+        count
+        for label, _, count in RESNET18_OPERATIONS
+        if label not in RESNET18_NON_COMPARABLE
+    )
+    print(f"Weighted standalone sum (all):       {weighted_sum:.6f} mJ/sample ({total_calls} module calls)")
+    print(f"Weighted OK-only sum (all):           {ok_weighted_sum:.6f} mJ/sample")
+    print(
+        f"Weighted standalone sum (comparable): {comparable_sum:.6f} mJ/sample "
+        f"({comparable_calls} module calls)"
+    )
+    print(f"Weighted OK-only sum (comparable):    {comparable_ok_sum:.6f} mJ/sample")
+    print("Excluded from comparable sum: ReLU and Flatten")
     print(
         "ResNet18 complete:       "
         f"{_format_energy(complete.energy_mj if complete else None)} mJ/sample "
@@ -237,13 +261,13 @@ def print_resnet18(path, batch=8):
         print("REVIEW rows: " + ", ".join(review))
 
     if complete and not missing:
-        gap = complete.energy_mj - weighted_sum
-        ratio = complete.energy_mj / weighted_sum if weighted_sum else float("nan")
-        coverage = 100 * weighted_sum / complete.energy_mj if complete.energy_mj else float("nan")
+        gap = complete.energy_mj - comparable_sum
+        ratio = complete.energy_mj / comparable_sum if comparable_sum else float("nan")
+        coverage = 100 * comparable_sum / complete.energy_mj if complete.energy_mj else float("nan")
         qualifier = "" if not review and complete.quality == "OK" else " (provisional)"
-        print(f"Gap (ResNet18 - weighted sum){qualifier}: {gap:+.6f} mJ/sample")
-        print(f"Ratio ResNet18/weighted sum{qualifier}: {ratio:.4f}")
-        print(f"Weighted standalone coverage{qualifier}: {coverage:.2f}%")
+        print(f"Gap (ResNet18 - comparable sum){qualifier}: {gap:+.6f} mJ/sample")
+        print(f"Ratio ResNet18/comparable sum{qualifier}: {ratio:.4f}")
+        print(f"Comparable standalone coverage{qualifier}: {coverage:.2f}%")
     else:
         print("Comparison unavailable because complete or component data is missing.")
 
@@ -252,12 +276,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--nano-summary", type=Path, default=Path("measurements/Plot/nano_base/summary.csv"))
     parser.add_argument("--pi5-summary", type=Path, default=Path("measurements/Plot/pi5/summary.csv"))
+    parser.add_argument("--agx-orin-summary", type=Path, default=Path("measurements/Plot/agx_orin/summary.csv"))
     parser.add_argument("--batches", nargs="+", type=int, default=[1, 16, 64, 128])
     args = parser.parse_args()
 
     print_platform("Nano", args.nano_summary, args.batches)
     print_platform("Pi5", args.pi5_summary, [1])
-    print_resnet18(args.nano_summary)
+    print_resnet18(args.nano_summary, label="Nano")
+    print_resnet18(args.agx_orin_summary, batch=1, label="AGX Orin")
 
 
 if __name__ == "__main__":

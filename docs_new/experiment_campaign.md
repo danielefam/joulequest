@@ -53,11 +53,14 @@ The protocol table displays:
 - **rows:** input-channel count;
 - **columns:** square image size.
 
+Each combination is measured at the output-channel widths used by common CNN
+width ladders.
+
 The naming convention does not follow visual row/column position. It follows
 the runner parser exactly:
 
 ```text
-Conv_<input_channels>_<image_size>_<kernel_size>_<padding>.pt
+Conv_<input_channels>_<image_size>_<kernel_size>_<padding>_<out_channels>.pt
 ```
 
 Input-channel values (table rows):
@@ -72,6 +75,12 @@ Image-size values (table columns):
 32 64 128 256 512 1024
 ```
 
+Output-channel values:
+
+```text
+1 8 16 32 64 128 256 512
+```
+
 Kernel/padding pairs:
 
 ```text
@@ -81,20 +90,20 @@ Kernel/padding pairs:
 The Cartesian product contains:
 
 $$
-10 \times 6 \times 4 = 240\text{ Conv experiments}
+10 \times 8 \times 6 \times 4 = 1920\text{ Conv experiments}
 $$
 
 For example, the table cell at input-channel row `2`, image-size column `64`,
-with kernel `5` and padding `1`, becomes:
+with kernel `5`, padding `1`, and `64` output channels becomes:
 
 ```text
-Models/CUDA/Conv/Conv_2_64_5_1.pt
+Models/CUDA/Conv/Conv_2_64_5_1_64.pt
 ```
 
 The complete default suite therefore contains:
 
 $$
-64 + 240 = 304\text{ experiments per board}
+64 + 1920 + 12 + 30 = 2026\text{ experiments per board}
 $$
 
 ## 3. Basic commands
@@ -178,6 +187,7 @@ The matrix variables are:
 ```bash
 LINEAR_SIZES="64 128 256 512 1024 2048 4096 8192"
 CONV_INPUT_CHANNELS="1 2 4 8 16 32 64 128 256 512"
+CONV_OUTPUT_CHANNELS="1 8 16 32 64 128 256 512"
 CONV_IMAGE_SIZES="32 64 128 256 512 1024"
 CONV_KERNEL_PADDING="3:0 3:1 5:0 5:1"
 ```
@@ -206,6 +216,7 @@ A reduced validation matrix can use:
 ```bash
 LINEAR_SIZES="64 128" \
 CONV_INPUT_CHANNELS="1 2" \
+CONV_OUTPUT_CHANNELS="1 8" \
 CONV_IMAGE_SIZES="32 64" \
 CONV_KERNEL_PADDING="3:0" \
   ./run_measurement_campaign.sh --board TEST_LABEL --suite all --dry-run
