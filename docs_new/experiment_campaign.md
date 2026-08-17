@@ -75,6 +75,22 @@ Image-size values (table columns):
 32 64 128 256 512 1024
 ```
 
+The launcher applies a conservative resolution cap based on input channels, so
+the listed values are not a full Cartesian product:
+
+| Input channels | Maximum image size |
+| --- | ---: |
+| 1-8 | 1024 |
+| 16-32 | 512 |
+| 64 | 256 |
+| 128 | 256 |
+| 256 | 128 |
+| 512 or more | 64 |
+
+This retains realistic high-resolution, low-channel cases while excluding
+improbably expensive high-channel, high-resolution cases. The launcher still
+uses batch size `1` for Conv measurements by default.
+
 Output-channel values:
 
 ```text
@@ -87,10 +103,10 @@ Kernel/padding pairs:
 3:0 3:1 5:0 5:1
 ```
 
-The Cartesian product contains:
+With the default channel-dependent resolution caps, the suite contains:
 
 $$
-10 \times 8 \times 6 \times 4 = 1920\text{ Conv experiments}
+47 \times 8 \times 4 = 1504\text{ Conv experiments}
 $$
 
 For example, the table cell at input-channel row `2`, image-size column `64`,
@@ -100,15 +116,17 @@ with kernel `5`, padding `1`, and `64` output channels becomes:
 Models/CUDA/Conv/Conv_2_64_5_1_64.pt
 ```
 
-The complete default suite therefore contains:
+The default `all` suite includes Linear, Conv, and LeNet only; run either
+ResNet suite explicitly when needed. Multiple suites can be combined in one
+comma-separated value, such as `all,resnet18,resnet50`. The default contains:
 
 $$
-64 + 1920 + 12 + 30 = 2026\text{ experiments per board}
+64 + 1504 + 12 = 1580\text{ experiments per board}
 $$
 
 ## 3. Basic commands
 
-Run the complete matrix:
+Run the default matrix (Linear, Conv, and LeNet):
 
 ```bash
 ./run_measurement_campaign.sh --board BOARD_LABEL --suite all
@@ -124,6 +142,19 @@ Run only Conv experiments:
 
 ```bash
 ./run_measurement_campaign.sh --board BOARD_LABEL --suite conv
+```
+
+Run either ResNet suite explicitly:
+
+```bash
+./run_measurement_campaign.sh --board BOARD_LABEL --suite resnet18
+./run_measurement_campaign.sh --board BOARD_LABEL --suite resnet50
+```
+
+Run the default matrix and both ResNet suites in one campaign:
+
+```bash
+./run_measurement_campaign.sh --board BOARD_LABEL --suite all,resnet18,resnet50
 ```
 
 List the commands without starting acquisition or inference:
@@ -209,7 +240,10 @@ LINEAR_CONV_BATCH_SIZE=1 NETWORK_BATCH_SIZE=8 \
 
 `BATCH_SIZE` remains supported as a common fallback for both variables. Resume
 checks include both the model path and selected batch size, so a completed run
-at one batch size does not suppress a measurement at another.
+at one batch size does not suppress a measurement at another. Legacy COMPLETE
+manifests without `input_batch_size` are treated as batch size `1`. Legacy
+Conv model paths without an output-channel suffix are treated as output
+channels `1`.
 
 A reduced validation matrix can use:
 

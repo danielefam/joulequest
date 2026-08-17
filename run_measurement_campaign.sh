@@ -68,7 +68,10 @@ EXPERIMENT_COOLDOWN_SECONDS="${EXPERIMENT_COOLDOWN_SECONDS:-20}"
 LINEAR_SIZES="${LINEAR_SIZES:-64 128 256 512 1024 2048 4096 8192}"
 
 # The protocol table displays input channels as rows and image sizes as
-# columns. Filenames deliberately use the runner convention:
+# columns. To avoid implausibly expensive high-channel/high-resolution cases,
+# the campaign caps each input-channel range at a realistic maximum resolution.
+# CONV_IMAGE_SIZES remains a global filter over those allowed resolutions.
+# Filenames deliberately use the runner convention:
 # Conv_<input_channels>_<image_size>_<kernel_size>_<padding>.pt
 CONV_INPUT_CHANNELS="${CONV_INPUT_CHANNELS:-1 2 4 8 16 32 64 128 256 512}"
 CONV_OUTPUT_CHANNELS="${CONV_OUTPUT_CHANNELS:-1 8 16 32 64 128 256 512}"
@@ -218,9 +221,9 @@ Usage:
 
 Options:
   --board LABEL       Safe label used only for the local result directory.
-        --suite SUITE       linear, conv, lenet, resnet18, resnet50, or all (default: all).
-                                                The lenet and ResNet suites include each architecture
-                                                and every distinct shape-specific operation in its graph.
+    --suite SUITES      Comma-separated suite list: linear, conv, lenet,
+                                            resnet18, resnet50, or all (default: all). all runs
+                                            Linear, Conv, and LeNet only.
   --dry-run           Print commands without running measurements.
   --continue-on-error Continue after an experiment exits nonzero.
   --repeat-completed  Rerun experiments with an existing COMPLETE manifest.
@@ -233,7 +236,7 @@ the script finishes, then invoke it again with a new BOARD_LABEL/configuration.
 
 Examples:
   ./run_measurement_campaign.sh --board jetson_nano --suite all
-    ./run_measurement_campaign.sh --board jetson_nano --suite resnet18
+    ./run_measurement_campaign.sh --board jetson_nano --suite all,resnet18,resnet50
   ./run_measurement_campaign.sh --board pi5 --suite linear --dry-run
 
 Override parameters without editing the script:
@@ -257,6 +260,28 @@ is_nonnegative_number() {
     [[ "$1" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)$ ]]
 }
 
+suite_is_selected() {
+    [[ -n "${SELECTED_SUITES[$1]+selected}" ]]
+}
+
+conv_max_image_size() {
+    local input_channels="$1"
+
+    if ((input_channels <= 8)); then
+        printf '1024\n'
+    elif ((input_channels <= 32)); then
+        printf '512\n'
+    elif ((input_channels <= 64)); then
+        printf '256\n'
+    elif ((input_channels <= 128)); then
+        printf '256\n'
+    elif ((input_channels <= 256)); then
+        printf '128\n'
+    else
+        printf '64\n'
+    fi
+}
+
 print_command() {
     printf '  '
     printf '%q ' "$@"
@@ -268,12 +293,26 @@ manifest_exists_for_model() {
     local batch_size="$2"
     "$PYTHON_BIN" - "$OUTPUT_DIRECTORY" "$model_path" "$batch_size" <<'PY'
 import json
+import re
 import sys
 from pathlib import Path
 
 output_directory = Path(sys.argv[1])
 model_path = sys.argv[2]
 batch_size = int(sys.argv[3])
+model_path_object = Path(model_path)
+completed_model_paths = {model_path}
+legacy_conv_match = re.fullmatch(
+    r"(Conv_\d+_\d+_\d+_\d+)_1(\.[^.]+)", model_path_object.name
+)
+if legacy_conv_match:
+    completed_model_paths.add(
+        str(
+            model_path_object.with_name(
+                f"{legacy_conv_match.group(1)}{legacy_conv_match.group(2)}"
+            )
+        )
+    )
 for manifest_path in output_directory.glob("*.json"):
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -281,8 +320,8 @@ for manifest_path in output_directory.glob("*.json"):
         continue
     if (
         manifest.get("status") == "COMPLETE"
-        and manifest.get("model_path") == model_path
-        and manifest.get("input_batch_size") == batch_size
+        and manifest.get("model_path") in completed_model_paths
+        and manifest.get("input_batch_size", 1) == batch_size
     ):
         raise SystemExit(0)
 raise SystemExit(1)
@@ -335,8 +374,23 @@ done
 [[ -n "$BOARD_LABEL" ]] || die "--board is required"
 [[ "$BOARD_LABEL" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] ||
     die "--board may contain only letters, numbers, dot, underscore, and dash"
-[[ "$SUITE" == "linear" || "$SUITE" == "conv" || "$SUITE" == "all" || "$SUITE" == "lenet" || "$SUITE" == "resnet18" || "$SUITE" == "resnet50" ]] ||
-    die "--suite must be linear, conv, lenet, resnet18, resnet50 or all"
+IFS=',' read -r -a REQUESTED_SUITES <<<"$SUITE"
+declare -A SELECTED_SUITES=()
+for suite_name in "${REQUESTED_SUITES[@]}"; do
+    case "$suite_name" in
+        all)
+            SELECTED_SUITES[linear]=1
+            SELECTED_SUITES[conv]=1
+            SELECTED_SUITES[lenet]=1
+            ;;
+        linear|conv|lenet|resnet18|resnet50)
+            SELECTED_SUITES["$suite_name"]=1
+            ;;
+        *)
+            die "--suite must be a comma-separated list of linear, conv, lenet, resnet18, resnet50, or all"
+            ;;
+    esac
+done
 [[ "$BACKEND" == "cpu" || "$BACKEND" == "cuda" || "$BACKEND" == "tpu" ]] ||
     die "BACKEND must be cpu, cuda, or tpu"
 [[ "$NUMBER_OF_CYCLES" =~ ^[1-9][0-9]*$ ]] ||
@@ -429,6 +483,16 @@ read -r -a CONV_OUTPUT_CHANNEL_LIST <<<"$CONV_OUTPUT_CHANNELS"
 read -r -a CONV_IMAGE_SIZE_LIST <<<"$CONV_IMAGE_SIZES"
 read -r -a CONV_KERNEL_PADDING_LIST <<<"$CONV_KERNEL_PADDING"
 
+conv_image_pair_total=0
+for input_channels in "${CONV_INPUT_CHANNEL_LIST[@]}"; do
+    max_image_size="$(conv_max_image_size "$input_channels")"
+    for image_size in "${CONV_IMAGE_SIZE_LIST[@]}"; do
+        if ((image_size <= max_image_size)); then
+            conv_image_pair_total=$((conv_image_pair_total + 1))
+        fi
+    done
+done
+
 for value in "${LINEAR_SIZE_LIST[@]}" "${CONV_INPUT_CHANNEL_LIST[@]}" \
     "${CONV_OUTPUT_CHANNEL_LIST[@]}" "${CONV_IMAGE_SIZE_LIST[@]}"; do
     [[ "$value" =~ ^[1-9][0-9]*$ ]] ||
@@ -490,19 +554,19 @@ conv_total=0
 lenet_total=0
 resnet18_total=0
 resnet50_total=0
-if [[ "$SUITE" == "linear" || "$SUITE" == "all" ]]; then
+if suite_is_selected linear; then
     linear_total=$((${#LINEAR_SIZE_LIST[@]} * ${#LINEAR_SIZE_LIST[@]}))
 fi
-if [[ "$SUITE" == "conv" || "$SUITE" == "all" ]]; then
-    conv_total=$((${#CONV_INPUT_CHANNEL_LIST[@]} * ${#CONV_OUTPUT_CHANNEL_LIST[@]} * ${#CONV_IMAGE_SIZE_LIST[@]} * ${#CONV_KERNEL_PADDING_LIST[@]}))
+if suite_is_selected conv; then
+    conv_total=$((conv_image_pair_total * ${#CONV_OUTPUT_CHANNEL_LIST[@]} * ${#CONV_KERNEL_PADDING_LIST[@]}))
 fi
-if [[ "$SUITE" == "lenet" || "$SUITE" == "all" ]]; then
+if suite_is_selected lenet; then
     lenet_total=$((1 + ${#LENET_COMPONENT_MODELS[@]}))
 fi
-if [[ "$SUITE" == "resnet18" || "$SUITE" == "all" ]]; then
+if suite_is_selected resnet18; then
     resnet18_total=$((1 + ${#RESNET18_COMPONENT_MODELS[@]}))
 fi
-if [[ "$SUITE" == "resnet50" || "$SUITE" == "all" ]]; then
+if suite_is_selected resnet50; then
     resnet50_total=$((1 + ${#RESNET50_COMPONENT_MODELS[@]}))
 fi
 total=$((linear_total + conv_total + lenet_total + resnet18_total + resnet50_total))
@@ -611,7 +675,7 @@ run_experiment() {
     return "$exit_code"
 }
 
-if [[ "$SUITE" == "linear" || "$SUITE" == "all" ]]; then
+if suite_is_selected linear; then
     for input_size in "${LINEAR_SIZE_LIST[@]}"; do
         for output_size in "${LINEAR_SIZE_LIST[@]}"; do
             run_experiment \
@@ -621,13 +685,15 @@ if [[ "$SUITE" == "linear" || "$SUITE" == "all" ]]; then
     done
 fi
 
-if [[ "$SUITE" == "conv" || "$SUITE" == "all" ]]; then
+if suite_is_selected conv; then
     for kernel_padding in "${CONV_KERNEL_PADDING_LIST[@]}"; do
         kernel_size="${kernel_padding%%:*}"
         padding="${kernel_padding##*:}"
         for input_channels in "${CONV_INPUT_CHANNEL_LIST[@]}"; do
+            max_image_size="$(conv_max_image_size "$input_channels")"
             for output_channels in "${CONV_OUTPUT_CHANNEL_LIST[@]}"; do
                 for image_size in "${CONV_IMAGE_SIZE_LIST[@]}"; do
+                    ((image_size <= max_image_size)) || continue
                     run_experiment \
                         "${CONV_MODEL_DIRECTORY}/Conv_${input_channels}_${image_size}_${kernel_size}_${padding}_${output_channels}${MODEL_SUFFIX}" \
                         "$LINEAR_CONV_BATCH_SIZE"
@@ -637,21 +703,21 @@ if [[ "$SUITE" == "conv" || "$SUITE" == "all" ]]; then
     done
 fi
 
-if [[ "$SUITE" == "lenet" || "$SUITE" == "all" ]]; then
+if suite_is_selected lenet; then
     run_experiment "$LENET_MODEL_PATH" "$NETWORK_BATCH_SIZE"
     for model_path in "${LENET_COMPONENT_MODELS[@]}"; do
         run_experiment "$model_path" "$NETWORK_BATCH_SIZE"
     done
 fi
 
-if [[ "$SUITE" == "resnet18" || "$SUITE" == "all" ]]; then
+if suite_is_selected resnet18; then
     run_experiment "$RESNET18_MODEL_PATH" "$NETWORK_BATCH_SIZE"
     for model_path in "${RESNET18_COMPONENT_MODELS[@]}"; do
         run_experiment "$model_path" "$NETWORK_BATCH_SIZE"
     done
 fi
 
-if [[ "$SUITE" == "resnet50" || "$SUITE" == "all" ]]; then
+if suite_is_selected resnet50; then
     run_experiment "$RESNET50_MODEL_PATH" 1
     for model_path in "${RESNET50_COMPONENT_MODELS[@]}"; do
         run_experiment "$model_path" 1
