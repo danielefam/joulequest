@@ -221,9 +221,9 @@ Usage:
 
 Options:
   --board LABEL       Safe label used only for the local result directory.
-        --suite SUITE       linear, conv, lenet, resnet18, resnet50, or all (default: all).
-                                                The lenet and ResNet suites include each architecture
-                                                and every distinct shape-specific operation in its graph.
+    --suite SUITES      Comma-separated suite list: linear, conv, lenet,
+                                            resnet18, resnet50, or all (default: all). all runs
+                                            Linear, Conv, and LeNet only.
   --dry-run           Print commands without running measurements.
   --continue-on-error Continue after an experiment exits nonzero.
   --repeat-completed  Rerun experiments with an existing COMPLETE manifest.
@@ -236,7 +236,7 @@ the script finishes, then invoke it again with a new BOARD_LABEL/configuration.
 
 Examples:
   ./run_measurement_campaign.sh --board jetson_nano --suite all
-    ./run_measurement_campaign.sh --board jetson_nano --suite resnet18
+    ./run_measurement_campaign.sh --board jetson_nano --suite all,resnet18,resnet50
   ./run_measurement_campaign.sh --board pi5 --suite linear --dry-run
 
 Override parameters without editing the script:
@@ -258,6 +258,10 @@ is_positive_number() {
 
 is_nonnegative_number() {
     [[ "$1" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)$ ]]
+}
+
+suite_is_selected() {
+    [[ -n "${SELECTED_SUITES[$1]+selected}" ]]
 }
 
 conv_max_image_size() {
@@ -356,8 +360,23 @@ done
 [[ -n "$BOARD_LABEL" ]] || die "--board is required"
 [[ "$BOARD_LABEL" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] ||
     die "--board may contain only letters, numbers, dot, underscore, and dash"
-[[ "$SUITE" == "linear" || "$SUITE" == "conv" || "$SUITE" == "all" || "$SUITE" == "lenet" || "$SUITE" == "resnet18" || "$SUITE" == "resnet50" ]] ||
-    die "--suite must be linear, conv, lenet, resnet18, resnet50 or all"
+IFS=',' read -r -a REQUESTED_SUITES <<<"$SUITE"
+declare -A SELECTED_SUITES=()
+for suite_name in "${REQUESTED_SUITES[@]}"; do
+    case "$suite_name" in
+        all)
+            SELECTED_SUITES[linear]=1
+            SELECTED_SUITES[conv]=1
+            SELECTED_SUITES[lenet]=1
+            ;;
+        linear|conv|lenet|resnet18|resnet50)
+            SELECTED_SUITES["$suite_name"]=1
+            ;;
+        *)
+            die "--suite must be a comma-separated list of linear, conv, lenet, resnet18, resnet50, or all"
+            ;;
+    esac
+done
 [[ "$BACKEND" == "cpu" || "$BACKEND" == "cuda" || "$BACKEND" == "tpu" ]] ||
     die "BACKEND must be cpu, cuda, or tpu"
 [[ "$NUMBER_OF_CYCLES" =~ ^[1-9][0-9]*$ ]] ||
@@ -521,19 +540,19 @@ conv_total=0
 lenet_total=0
 resnet18_total=0
 resnet50_total=0
-if [[ "$SUITE" == "linear" || "$SUITE" == "all" ]]; then
+if suite_is_selected linear; then
     linear_total=$((${#LINEAR_SIZE_LIST[@]} * ${#LINEAR_SIZE_LIST[@]}))
 fi
-if [[ "$SUITE" == "conv" || "$SUITE" == "all" ]]; then
+if suite_is_selected conv; then
     conv_total=$((conv_image_pair_total * ${#CONV_OUTPUT_CHANNEL_LIST[@]} * ${#CONV_KERNEL_PADDING_LIST[@]}))
 fi
-if [[ "$SUITE" == "lenet" || "$SUITE" == "all" ]]; then
+if suite_is_selected lenet; then
     lenet_total=$((1 + ${#LENET_COMPONENT_MODELS[@]}))
 fi
-if [[ "$SUITE" == "resnet18" || "$SUITE" == "all" ]]; then
+if suite_is_selected resnet18; then
     resnet18_total=$((1 + ${#RESNET18_COMPONENT_MODELS[@]}))
 fi
-if [[ "$SUITE" == "resnet50" || "$SUITE" == "all" ]]; then
+if suite_is_selected resnet50; then
     resnet50_total=$((1 + ${#RESNET50_COMPONENT_MODELS[@]}))
 fi
 total=$((linear_total + conv_total + lenet_total + resnet18_total + resnet50_total))
@@ -642,7 +661,7 @@ run_experiment() {
     return "$exit_code"
 }
 
-if [[ "$SUITE" == "linear" || "$SUITE" == "all" ]]; then
+if suite_is_selected linear; then
     for input_size in "${LINEAR_SIZE_LIST[@]}"; do
         for output_size in "${LINEAR_SIZE_LIST[@]}"; do
             run_experiment \
@@ -652,7 +671,7 @@ if [[ "$SUITE" == "linear" || "$SUITE" == "all" ]]; then
     done
 fi
 
-if [[ "$SUITE" == "conv" || "$SUITE" == "all" ]]; then
+if suite_is_selected conv; then
     for kernel_padding in "${CONV_KERNEL_PADDING_LIST[@]}"; do
         kernel_size="${kernel_padding%%:*}"
         padding="${kernel_padding##*:}"
@@ -670,21 +689,21 @@ if [[ "$SUITE" == "conv" || "$SUITE" == "all" ]]; then
     done
 fi
 
-if [[ "$SUITE" == "lenet" || "$SUITE" == "all" ]]; then
+if suite_is_selected lenet; then
     run_experiment "$LENET_MODEL_PATH" "$NETWORK_BATCH_SIZE"
     for model_path in "${LENET_COMPONENT_MODELS[@]}"; do
         run_experiment "$model_path" "$NETWORK_BATCH_SIZE"
     done
 fi
 
-if [[ "$SUITE" == "resnet18" || "$SUITE" == "all" ]]; then
+if suite_is_selected resnet18; then
     run_experiment "$RESNET18_MODEL_PATH" "$NETWORK_BATCH_SIZE"
     for model_path in "${RESNET18_COMPONENT_MODELS[@]}"; do
         run_experiment "$model_path" "$NETWORK_BATCH_SIZE"
     done
 fi
 
-if [[ "$SUITE" == "resnet50" || "$SUITE" == "all" ]]; then
+if suite_is_selected resnet50; then
     run_experiment "$RESNET50_MODEL_PATH" 1
     for model_path in "${RESNET50_COMPONENT_MODELS[@]}"; do
         run_experiment "$model_path" 1

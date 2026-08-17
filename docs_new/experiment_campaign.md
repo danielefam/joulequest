@@ -116,15 +116,17 @@ with kernel `5`, padding `1`, and `64` output channels becomes:
 Models/CUDA/Conv/Conv_2_64_5_1_64.pt
 ```
 
-The complete default suite therefore contains:
+The default `all` suite includes Linear, Conv, and LeNet only; run either
+ResNet suite explicitly when needed. Multiple suites can be combined in one
+comma-separated value, such as `all,resnet18,resnet50`. The default contains:
 
 $$
-64 + 1504 + 12 + 30 = 1610\text{ experiments per board}
+64 + 1504 + 12 = 1580\text{ experiments per board}
 $$
 
 ## 3. Basic commands
 
-Run the complete matrix:
+Run the default matrix (Linear, Conv, and LeNet):
 
 ```bash
 ./run_measurement_campaign.sh --board BOARD_LABEL --suite all
@@ -140,6 +142,19 @@ Run only Conv experiments:
 
 ```bash
 ./run_measurement_campaign.sh --board BOARD_LABEL --suite conv
+```
+
+Run either ResNet suite explicitly:
+
+```bash
+./run_measurement_campaign.sh --board BOARD_LABEL --suite resnet18
+./run_measurement_campaign.sh --board BOARD_LABEL --suite resnet50
+```
+
+Run the default matrix and both ResNet suites in one campaign:
+
+```bash
+./run_measurement_campaign.sh --board BOARD_LABEL --suite all,resnet18,resnet50
 ```
 
 List the commands without starting acquisition or inference:
