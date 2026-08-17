@@ -293,12 +293,26 @@ manifest_exists_for_model() {
     local batch_size="$2"
     "$PYTHON_BIN" - "$OUTPUT_DIRECTORY" "$model_path" "$batch_size" <<'PY'
 import json
+import re
 import sys
 from pathlib import Path
 
 output_directory = Path(sys.argv[1])
 model_path = sys.argv[2]
 batch_size = int(sys.argv[3])
+model_path_object = Path(model_path)
+completed_model_paths = {model_path}
+legacy_conv_match = re.fullmatch(
+    r"(Conv_\d+_\d+_\d+_\d+)_1(\.[^.]+)", model_path_object.name
+)
+if legacy_conv_match:
+    completed_model_paths.add(
+        str(
+            model_path_object.with_name(
+                f"{legacy_conv_match.group(1)}{legacy_conv_match.group(2)}"
+            )
+        )
+    )
 for manifest_path in output_directory.glob("*.json"):
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -306,7 +320,7 @@ for manifest_path in output_directory.glob("*.json"):
         continue
     if (
         manifest.get("status") == "COMPLETE"
-        and manifest.get("model_path") == model_path
+        and manifest.get("model_path") in completed_model_paths
         and manifest.get("input_batch_size", 1) == batch_size
     ):
         raise SystemExit(0)
