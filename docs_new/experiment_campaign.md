@@ -240,7 +240,8 @@ LINEAR_CONV_BATCH_SIZE=1 NETWORK_BATCH_SIZE=8 \
 
 `BATCH_SIZE` remains supported as a common fallback for both variables. Resume
 checks include both the model path and selected batch size, so a completed run
-at one batch size does not suppress a measurement at another.
+at one batch size does not suppress a measurement at another. Legacy COMPLETE
+manifests without `input_batch_size` are treated as batch size `1`.
 
 A reduced validation matrix can use:
 

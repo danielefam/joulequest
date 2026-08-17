@@ -307,7 +307,7 @@ for manifest_path in output_directory.glob("*.json"):
     if (
         manifest.get("status") == "COMPLETE"
         and manifest.get("model_path") == model_path
-        and manifest.get("input_batch_size") == batch_size
+        and manifest.get("input_batch_size", 1) == batch_size
     ):
         raise SystemExit(0)
 raise SystemExit(1)
