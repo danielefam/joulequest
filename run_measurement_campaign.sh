@@ -68,7 +68,10 @@ EXPERIMENT_COOLDOWN_SECONDS="${EXPERIMENT_COOLDOWN_SECONDS:-20}"
 LINEAR_SIZES="${LINEAR_SIZES:-64 128 256 512 1024 2048 4096 8192}"
 
 # The protocol table displays input channels as rows and image sizes as
-# columns. Filenames deliberately use the runner convention:
+# columns. To avoid implausibly expensive high-channel/high-resolution cases,
+# the campaign caps each input-channel range at a realistic maximum resolution.
+# CONV_IMAGE_SIZES remains a global filter over those allowed resolutions.
+# Filenames deliberately use the runner convention:
 # Conv_<input_channels>_<image_size>_<kernel_size>_<padding>.pt
 CONV_INPUT_CHANNELS="${CONV_INPUT_CHANNELS:-1 2 4 8 16 32 64 128 256 512}"
 CONV_OUTPUT_CHANNELS="${CONV_OUTPUT_CHANNELS:-1 8 16 32 64 128 256 512}"
@@ -257,6 +260,24 @@ is_nonnegative_number() {
     [[ "$1" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)$ ]]
 }
 
+conv_max_image_size() {
+    local input_channels="$1"
+
+    if ((input_channels <= 8)); then
+        printf '1024\n'
+    elif ((input_channels <= 32)); then
+        printf '512\n'
+    elif ((input_channels <= 64)); then
+        printf '256\n'
+    elif ((input_channels <= 128)); then
+        printf '256\n'
+    elif ((input_channels <= 256)); then
+        printf '128\n'
+    else
+        printf '64\n'
+    fi
+}
+
 print_command() {
     printf '  '
     printf '%q ' "$@"
@@ -429,6 +450,16 @@ read -r -a CONV_OUTPUT_CHANNEL_LIST <<<"$CONV_OUTPUT_CHANNELS"
 read -r -a CONV_IMAGE_SIZE_LIST <<<"$CONV_IMAGE_SIZES"
 read -r -a CONV_KERNEL_PADDING_LIST <<<"$CONV_KERNEL_PADDING"
 
+conv_image_pair_total=0
+for input_channels in "${CONV_INPUT_CHANNEL_LIST[@]}"; do
+    max_image_size="$(conv_max_image_size "$input_channels")"
+    for image_size in "${CONV_IMAGE_SIZE_LIST[@]}"; do
+        if ((image_size <= max_image_size)); then
+            conv_image_pair_total=$((conv_image_pair_total + 1))
+        fi
+    done
+done
+
 for value in "${LINEAR_SIZE_LIST[@]}" "${CONV_INPUT_CHANNEL_LIST[@]}" \
     "${CONV_OUTPUT_CHANNEL_LIST[@]}" "${CONV_IMAGE_SIZE_LIST[@]}"; do
     [[ "$value" =~ ^[1-9][0-9]*$ ]] ||
@@ -494,7 +525,7 @@ if [[ "$SUITE" == "linear" || "$SUITE" == "all" ]]; then
     linear_total=$((${#LINEAR_SIZE_LIST[@]} * ${#LINEAR_SIZE_LIST[@]}))
 fi
 if [[ "$SUITE" == "conv" || "$SUITE" == "all" ]]; then
-    conv_total=$((${#CONV_INPUT_CHANNEL_LIST[@]} * ${#CONV_OUTPUT_CHANNEL_LIST[@]} * ${#CONV_IMAGE_SIZE_LIST[@]} * ${#CONV_KERNEL_PADDING_LIST[@]}))
+    conv_total=$((conv_image_pair_total * ${#CONV_OUTPUT_CHANNEL_LIST[@]} * ${#CONV_KERNEL_PADDING_LIST[@]}))
 fi
 if [[ "$SUITE" == "lenet" || "$SUITE" == "all" ]]; then
     lenet_total=$((1 + ${#LENET_COMPONENT_MODELS[@]}))
@@ -626,8 +657,10 @@ if [[ "$SUITE" == "conv" || "$SUITE" == "all" ]]; then
         kernel_size="${kernel_padding%%:*}"
         padding="${kernel_padding##*:}"
         for input_channels in "${CONV_INPUT_CHANNEL_LIST[@]}"; do
+            max_image_size="$(conv_max_image_size "$input_channels")"
             for output_channels in "${CONV_OUTPUT_CHANNEL_LIST[@]}"; do
                 for image_size in "${CONV_IMAGE_SIZE_LIST[@]}"; do
+                    ((image_size <= max_image_size)) || continue
                     run_experiment \
                         "${CONV_MODEL_DIRECTORY}/Conv_${input_channels}_${image_size}_${kernel_size}_${padding}_${output_channels}${MODEL_SUFFIX}" \
                         "$LINEAR_CONV_BATCH_SIZE"
