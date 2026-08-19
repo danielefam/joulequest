@@ -300,6 +300,24 @@ status, achieved sampling rate, inference count, expected and detected active
 regions, classifier source, clock uncertainty/fallback reason, idle-baseline
 source/statistics, threshold, power mean/variance, and energy mean/variance.
 
+## Energy lookup table
+
+Create a table for the downstream energy-inference program from one or more
+processed board summaries:
+
+```bash
+python processing_report/build_energy_lookup_table.py \
+  measurements/Plot/pi5/summary.csv \
+  --output measurements/Plot/pi5/energy_lookup_table.csv
+```
+
+The output has one row per measured layer configuration. Linear rows use
+`input_features` and `output_features`; convolution rows use
+`input_channels`, `output_channels`, `input_image_size`, `kernel_size`,
+`stride`, and `padding`. `energy_mean_mJ` is the mean energy per input sample,
+while `measurement_count` and `energy_stddev_mJ` retain repeatability data for
+the inference program. Only `COMPLETE` and `OK` campaigns are included.
+
 ## More help
 
 For the complete measurement procedure, read `docs_new/adaptive_burst_measurement.md`.

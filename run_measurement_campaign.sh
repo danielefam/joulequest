@@ -20,6 +20,8 @@ MODEL_ROOT="${MODEL_ROOT:-Models/CUDA}"
 MODEL_SUFFIX="${MODEL_SUFFIX:-.pt}"
 LINEAR_MODEL_DIRECTORY="${LINEAR_MODEL_DIRECTORY:-${MODEL_ROOT}/Linear}"
 CONV_MODEL_DIRECTORY="${CONV_MODEL_DIRECTORY:-${MODEL_ROOT}/Conv}"
+ATTENTION_MODEL_DIRECTORY="${ATTENTION_MODEL_DIRECTORY:-${MODEL_ROOT}/Attention}"
+ROTARY_ATTENTION_MODEL_DIRECTORY="${ROTARY_ATTENTION_MODEL_DIRECTORY:-${MODEL_ROOT}/RotaryAttention}"
 LENET_MODEL_DIRECTORY="${LENET_MODEL_DIRECTORY:-${MODEL_ROOT}/Lenet}"
 LENET_MODEL_PATH="${LENET_MODEL_PATH:-${LENET_MODEL_DIRECTORY}/Lenet${MODEL_SUFFIX}}"
 POOL_MODEL_DIRECTORY="${POOL_MODEL_DIRECTORY:-${MODEL_ROOT}/Pool}"
@@ -77,6 +79,12 @@ CONV_INPUT_CHANNELS="${CONV_INPUT_CHANNELS:-1 2 4 8 16 32 64 128 256 512}"
 CONV_OUTPUT_CHANNELS="${CONV_OUTPUT_CHANNELS:-1 8 16 32 64 128 256 512}"
 CONV_IMAGE_SIZES="${CONV_IMAGE_SIZES:-32 64 128 256 512 1024}"
 CONV_KERNEL_PADDING="${CONV_KERNEL_PADDING:-3:0 3:1 5:0 5:1}"
+
+# Self-attention is measured at batch size 1. Every embedding dimension is
+# paired with head dimensions 32, 64, and 128; the head count is d / d_head.
+ATTENTION_SEQUENCE_LENGTHS="${ATTENTION_SEQUENCE_LENGTHS:-128 256 512 1024 2048}"
+ATTENTION_EMBED_DIMS="${ATTENTION_EMBED_DIMS:-128 256 384 512 768 1024 4096}"
+ATTENTION_HEAD_DIMS="${ATTENTION_HEAD_DIMS:-32 64 128}"
 
 # Ordered standalone operations in TorchRunner's LeNet definition. The first
 # dimension of ReLU and Flatten models is the batch dimension and is replaced
@@ -221,9 +229,10 @@ Usage:
 
 Options:
   --board LABEL       Safe label used only for the local result directory.
-    --suite SUITES      Comma-separated suite list: linear, conv, lenet,
-                                            resnet18, resnet50, or all (default: all). all runs
-                                            Linear, Conv, and LeNet only.
+    --suite SUITES      Comma-separated suite list: linear, conv, attention,
+                                            rotaryattention, lenet, resnet18, resnet50, or all
+                                            (default: all). all runs Linear, Conv, SelfAttention,
+                                            RotaryAttention, and LeNet.
   --dry-run           Print commands without running measurements.
   --continue-on-error Continue after an experiment exits nonzero.
   --repeat-completed  Rerun experiments with an existing COMPLETE manifest.
@@ -236,6 +245,7 @@ the script finishes, then invoke it again with a new BOARD_LABEL/configuration.
 
 Examples:
   ./run_measurement_campaign.sh --board jetson_nano --suite all
+    ./run_measurement_campaign.sh --board jetson_nano --suite attention
     ./run_measurement_campaign.sh --board jetson_nano --suite all,resnet18,resnet50
   ./run_measurement_campaign.sh --board pi5 --suite linear --dry-run
 
@@ -381,13 +391,15 @@ for suite_name in "${REQUESTED_SUITES[@]}"; do
         all)
             SELECTED_SUITES[linear]=1
             SELECTED_SUITES[conv]=1
+            SELECTED_SUITES[attention]=1
+            SELECTED_SUITES[rotaryattention]=1
             SELECTED_SUITES[lenet]=1
             ;;
-        linear|conv|lenet|resnet18|resnet50)
+        linear|conv|attention|rotaryattention|lenet|resnet18|resnet50)
             SELECTED_SUITES["$suite_name"]=1
             ;;
         *)
-            die "--suite must be a comma-separated list of linear, conv, lenet, resnet18, resnet50, or all"
+            die "--suite must be a comma-separated list of linear, conv, attention, rotaryattention, lenet, resnet18, resnet50, or all"
             ;;
     esac
 done
@@ -482,6 +494,9 @@ read -r -a CONV_INPUT_CHANNEL_LIST <<<"$CONV_INPUT_CHANNELS"
 read -r -a CONV_OUTPUT_CHANNEL_LIST <<<"$CONV_OUTPUT_CHANNELS"
 read -r -a CONV_IMAGE_SIZE_LIST <<<"$CONV_IMAGE_SIZES"
 read -r -a CONV_KERNEL_PADDING_LIST <<<"$CONV_KERNEL_PADDING"
+read -r -a ATTENTION_SEQUENCE_LENGTH_LIST <<<"$ATTENTION_SEQUENCE_LENGTHS"
+read -r -a ATTENTION_EMBED_DIM_LIST <<<"$ATTENTION_EMBED_DIMS"
+read -r -a ATTENTION_HEAD_DIM_LIST <<<"$ATTENTION_HEAD_DIMS"
 
 conv_image_pair_total=0
 for input_channels in "${CONV_INPUT_CHANNEL_LIST[@]}"; do
@@ -494,9 +509,17 @@ for input_channels in "${CONV_INPUT_CHANNEL_LIST[@]}"; do
 done
 
 for value in "${LINEAR_SIZE_LIST[@]}" "${CONV_INPUT_CHANNEL_LIST[@]}" \
-    "${CONV_OUTPUT_CHANNEL_LIST[@]}" "${CONV_IMAGE_SIZE_LIST[@]}"; do
+    "${CONV_OUTPUT_CHANNEL_LIST[@]}" "${CONV_IMAGE_SIZE_LIST[@]}" \
+    "${ATTENTION_SEQUENCE_LENGTH_LIST[@]}" "${ATTENTION_EMBED_DIM_LIST[@]}" \
+    "${ATTENTION_HEAD_DIM_LIST[@]}"; do
     [[ "$value" =~ ^[1-9][0-9]*$ ]] ||
         die "matrix values must be positive integers: $value"
+done
+for embed_dim in "${ATTENTION_EMBED_DIM_LIST[@]}"; do
+    for head_dim in "${ATTENTION_HEAD_DIM_LIST[@]}"; do
+        ((embed_dim % head_dim == 0)) ||
+            die "ATTENTION_EMBED_DIMS values must be divisible by ATTENTION_HEAD_DIMS values"
+    done
 done
 for pair in "${CONV_KERNEL_PADDING_LIST[@]}"; do
     [[ "$pair" =~ ^[1-9][0-9]*:[0-9]+$ ]] ||
@@ -551,6 +574,8 @@ fi
 
 linear_total=0
 conv_total=0
+attention_total=0
+rotaryattention_total=0
 lenet_total=0
 resnet18_total=0
 resnet50_total=0
@@ -559,6 +584,12 @@ if suite_is_selected linear; then
 fi
 if suite_is_selected conv; then
     conv_total=$((conv_image_pair_total * ${#CONV_OUTPUT_CHANNEL_LIST[@]} * ${#CONV_KERNEL_PADDING_LIST[@]}))
+fi
+if suite_is_selected attention; then
+    attention_total=$((${#ATTENTION_SEQUENCE_LENGTH_LIST[@]} * ${#ATTENTION_EMBED_DIM_LIST[@]} * ${#ATTENTION_HEAD_DIM_LIST[@]}))
+fi
+if suite_is_selected rotaryattention; then
+    rotaryattention_total=$((${#ATTENTION_SEQUENCE_LENGTH_LIST[@]} * ${#ATTENTION_EMBED_DIM_LIST[@]}))
 fi
 if suite_is_selected lenet; then
     lenet_total=$((1 + ${#LENET_COMPONENT_MODELS[@]}))
@@ -569,12 +600,12 @@ fi
 if suite_is_selected resnet50; then
     resnet50_total=$((1 + ${#RESNET50_COMPONENT_MODELS[@]}))
 fi
-total=$((linear_total + conv_total + lenet_total + resnet18_total + resnet50_total))
+total=$((linear_total + conv_total + attention_total + rotaryattention_total + lenet_total + resnet18_total + resnet50_total))
 
 printf 'Board label: %s\n' "$BOARD_LABEL"
-printf 'Suite: %s (%d Linear, %d Conv, %d LeNet, %d ResNet-18, %d ResNet-50, %d total)\n' \
-    "$SUITE" "$linear_total" "$conv_total" "$lenet_total" "$resnet18_total" "$resnet50_total" "$total"
-printf 'Batch sizes: Linear/Conv=%s; LeNet/ResNet-18=%s; ResNet-50=1\n' \
+printf 'Suite: %s (%d Linear, %d Conv, %d SelfAttention, %d RotaryAttention, %d LeNet, %d ResNet-18, %d ResNet-50, %d total)\n' \
+    "$SUITE" "$linear_total" "$conv_total" "$attention_total" "$rotaryattention_total" "$lenet_total" "$resnet18_total" "$resnet50_total" "$total"
+printf 'Batch sizes: Linear/Conv=%s; Attention/RotaryAttention=1; LeNet/ResNet-18=%s; ResNet-50=1\n' \
     "$LINEAR_CONV_BATCH_SIZE" "$NETWORK_BATCH_SIZE"
 printf 'Results: %s\n' "$OUTPUT_DIRECTORY"
 ((DRY_RUN == 0)) || printf 'Mode: dry-run (no measurements will start)\n'
@@ -699,6 +730,30 @@ if suite_is_selected conv; then
                         "$LINEAR_CONV_BATCH_SIZE"
                 done
             done
+        done
+    done
+fi
+
+if suite_is_selected attention; then
+    for sequence_length in "${ATTENTION_SEQUENCE_LENGTH_LIST[@]}"; do
+        for embed_dim in "${ATTENTION_EMBED_DIM_LIST[@]}"; do
+            for head_dim in "${ATTENTION_HEAD_DIM_LIST[@]}"; do
+                num_heads=$((embed_dim / head_dim))
+                run_experiment \
+                    "${ATTENTION_MODEL_DIRECTORY}/Attention_${sequence_length}_${embed_dim}_${num_heads}${MODEL_SUFFIX}" \
+                    1
+            done
+        done
+    done
+fi
+
+if suite_is_selected rotaryattention; then
+    for sequence_length in "${ATTENTION_SEQUENCE_LENGTH_LIST[@]}"; do
+        for embed_dim in "${ATTENTION_EMBED_DIM_LIST[@]}"; do
+            num_heads=$((embed_dim / 64))
+            run_experiment \
+                "${ROTARY_ATTENTION_MODEL_DIRECTORY}/RotaryAttention_${sequence_length}_${embed_dim}_${num_heads}${MODEL_SUFFIX}" \
+                1
         done
     done
 fi

@@ -116,17 +116,58 @@ with kernel `5`, padding `1`, and `64` output channels becomes:
 Models/CUDA/Conv/Conv_2_64_5_1_64.pt
 ```
 
-The default `all` suite includes Linear, Conv, and LeNet only; run either
-ResNet suite explicitly when needed. Multiple suites can be combined in one
-comma-separated value, such as `all,resnet18,resnet50`. The default contains:
+### Self-Attention layers
+
+The `attention` suite runs standard self-attention at batch size `1`. Its
+model filenames follow the runner convention:
+
+```text
+Attention_<sequence_length>_<embed_dim>_<num_heads>.pt
+```
+
+It sweeps these values:
+
+```text
+sequence lengths: 16 32 64 128 256 512 1024
+embedding dimensions: 128 256 384 512 768 1024
+head dimensions: 32 64 128
+```
+
+For each embedding and head dimension, the launcher derives the number of
+heads as $h=d/d_{head}$. This produces:
 
 $$
-64 + 1504 + 12 = 1580\text{ experiments per board}
+7 \times 6 \times 3 = 126\text{ SelfAttention experiments}
+$$
+
+### Rotary Self-Attention layers
+
+The separate `rotaryattention` suite uses the same sequence and embedding
+dimensions with the common fixed head dimension of $64$:
+
+```text
+RotaryAttention_<sequence_length>_<embed_dim>_<embed_dim / 64>.pt
+```
+
+It contains:
+
+$$
+7 \times 6 = 42\text{ RotaryAttention experiments}
+$$
+
+The default `all` suite includes Linear, Conv, SelfAttention,
+RotaryAttention, and LeNet. Run either ResNet suite explicitly when needed.
+Multiple suites can be combined in one comma-separated value, such as
+`all,resnet18,resnet50`. The default contains:
+
+$$
+64 + 1504 + 126 + 42 + 12 = 1748\text{ experiments per board}
 $$
 
 ## 3. Basic commands
 
-Run the default matrix (Linear, Conv, and LeNet):
+Run the default matrix (Linear, Conv, SelfAttention, RotaryAttention, and
+LeNet):
 
 ```bash
 ./run_measurement_campaign.sh --board BOARD_LABEL --suite all
@@ -142,6 +183,13 @@ Run only Conv experiments:
 
 ```bash
 ./run_measurement_campaign.sh --board BOARD_LABEL --suite conv
+```
+
+Run the SelfAttention or RotaryAttention suite:
+
+```bash
+./run_measurement_campaign.sh --board BOARD_LABEL --suite attention
+./run_measurement_campaign.sh --board BOARD_LABEL --suite rotaryattention
 ```
 
 Run either ResNet suite explicitly:
@@ -180,6 +228,8 @@ campaign parameters:
 | `MODEL_ROOT` | `Models/CPU` | Model/specification root on the inference host |
 | `LINEAR_MODEL_DIRECTORY` | `${MODEL_ROOT}/Linear` | Linear model directory |
 | `CONV_MODEL_DIRECTORY` | `${MODEL_ROOT}/Conv` | Conv model directory |
+| `ATTENTION_MODEL_DIRECTORY` | `${MODEL_ROOT}/Attention` | SelfAttention model directory |
+| `ROTARY_ATTENTION_MODEL_DIRECTORY` | `${MODEL_ROOT}/RotaryAttention` | RotarySelfAttention model directory |
 | `MODEL_SUFFIX` | `.pt` | Filename suffix |
 | `NUMBER_OF_CYCLES` | `100` | Measured cycles per experiment |
 | `LINEAR_CONV_BATCH_SIZE` | `BATCH_SIZE`, otherwise `1` | Input batch size for Linear and Conv suites |
@@ -221,6 +271,9 @@ CONV_INPUT_CHANNELS="1 2 4 8 16 32 64 128 256 512"
 CONV_OUTPUT_CHANNELS="1 8 16 32 64 128 256 512"
 CONV_IMAGE_SIZES="32 64 128 256 512 1024"
 CONV_KERNEL_PADDING="3:0 3:1 5:0 5:1"
+ATTENTION_SEQUENCE_LENGTHS="16 32 64 128 256 512 1024"
+ATTENTION_EMBED_DIMS="128 256 384 512 768 1024"
+ATTENTION_HEAD_DIMS="32 64 128"
 ```
 
 Values can be modified in the script or overridden for one invocation. For
