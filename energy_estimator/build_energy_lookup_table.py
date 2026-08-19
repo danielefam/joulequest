@@ -15,6 +15,30 @@ RESNET_CONV_PATTERN = re.compile(
     r"^ResNetConv_(\d+)_(\d+)_(\d+)_(\d+)_(\d+)_(\d+)$",
     re.IGNORECASE,
 )
+ATTENTION_PATTERN = re.compile(
+    r"^(RotaryAttention|Attention)_(\d+)_(\d+)_(\d+)$",
+    re.IGNORECASE,
+)
+
+
+def _dimensions(layer_type, **values):
+    dimensions = {
+        "layer_type": layer_type,
+        "input_features": None,
+        "output_features": None,
+        "input_channels": None,
+        "output_channels": None,
+        "input_image_size": None,
+        "kernel_size": None,
+        "stride": None,
+        "padding": None,
+        "sequence_length": None,
+        "embed_dim": None,
+        "num_heads": None,
+        "head_dim": None,
+    }
+    dimensions.update(values)
+    return dimensions
 
 
 def _parse_layer(model_path):
@@ -24,34 +48,26 @@ def _parse_layer(model_path):
     linear_match = LINEAR_PATTERN.fullmatch(stem)
     if linear_match:
         input_features, output_features = map(int, linear_match.groups())
-        return {
-            "layer_type": "linear",
-            "input_features": input_features,
-            "output_features": output_features,
-            "input_channels": None,
-            "output_channels": None,
-            "input_image_size": None,
-            "kernel_size": None,
-            "stride": None,
-            "padding": None,
-        }
+        return _dimensions(
+            "linear",
+            input_features=input_features,
+            output_features=output_features,
+        )
 
     conv_match = CONV_PATTERN.fullmatch(stem)
     if conv_match:
         input_channels, image_size, kernel_size, padding, output_channels = (
             conv_match.groups()
         )
-        return {
-            "layer_type": "conv",
-            "input_features": None,
-            "output_features": None,
-            "input_channels": int(input_channels),
-            "output_channels": int(output_channels or 1),
-            "input_image_size": int(image_size),
-            "kernel_size": int(kernel_size),
-            "stride": 1,
-            "padding": int(padding),
-        }
+        return _dimensions(
+            "conv",
+            input_channels=int(input_channels),
+            output_channels=int(output_channels or 1),
+            input_image_size=int(image_size),
+            kernel_size=int(kernel_size),
+            stride=1,
+            padding=int(padding),
+        )
 
     resnet_conv_match = RESNET_CONV_PATTERN.fullmatch(stem)
     if resnet_conv_match:
@@ -63,17 +79,34 @@ def _parse_layer(model_path):
             stride,
             padding,
         ) = map(int, resnet_conv_match.groups())
-        return {
-            "layer_type": "conv",
-            "input_features": None,
-            "output_features": None,
-            "input_channels": input_channels,
-            "output_channels": output_channels,
-            "input_image_size": image_size,
-            "kernel_size": kernel_size,
-            "stride": stride,
-            "padding": padding,
-        }
+        return _dimensions(
+            "conv",
+            input_channels=input_channels,
+            output_channels=output_channels,
+            input_image_size=image_size,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=padding,
+        )
+
+    attention_match = ATTENTION_PATTERN.fullmatch(stem)
+    if attention_match:
+        layer_name, sequence_length, embed_dim, num_heads = attention_match.groups()
+        sequence_length, embed_dim, num_heads = map(
+            int, (sequence_length, embed_dim, num_heads)
+        )
+        if embed_dim % num_heads != 0:
+            return None
+        layer_type = (
+            "rotaryattention" if layer_name.lower().startswith("rotary") else "attention"
+        )
+        return _dimensions(
+            layer_type,
+            sequence_length=sequence_length,
+            embed_dim=embed_dim,
+            num_heads=num_heads,
+            head_dim=embed_dim // num_heads,
+        )
     return None
 
 
@@ -111,6 +144,10 @@ def build_lookup_table(summary_paths):
         "kernel_size",
         "stride",
         "padding",
+        "sequence_length",
+        "embed_dim",
+        "num_heads",
+        "head_dim",
         "measurement_count",
         "energy_mean_mJ",
         "energy_stddev_mJ",
@@ -118,7 +155,7 @@ def build_lookup_table(summary_paths):
     if not measurements:
         return pd.DataFrame(columns=columns)
 
-    dimensions = columns[:9]
+    dimensions = columns[:13]
     lookup = (
         pd.DataFrame(measurements)
         .groupby(dimensions, dropna=False, as_index=False)["energy_mean_mJ"]
@@ -131,7 +168,7 @@ def build_lookup_table(summary_paths):
 
 def build_parser():
     parser = argparse.ArgumentParser(
-        description="Create a linear/convolution energy lookup table."
+        description="Create a linear/convolution/attention energy lookup table."
     )
     parser.add_argument(
         "summary_paths",

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from processing_report.build_energy_lookup_table import build_lookup_table
+from energy_estimator.build_energy_lookup_table import build_lookup_table
 
 
 class EnergyLookupTableTests(unittest.TestCase):
@@ -46,6 +46,12 @@ class EnergyLookupTableTests(unittest.TestCase):
                 "quality_status": "OK",
                 "energy_mean_mJ": 99.0,
             },
+            {
+                "model_path": "Models/CUDA/Attention/Attention_128_256_4.pt",
+                "status": "COMPLETE",
+                "quality_status": "OK",
+                "energy_mean_mJ": 6.0,
+            },
         ]
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -53,7 +59,7 @@ class EnergyLookupTableTests(unittest.TestCase):
             pd.DataFrame(rows).to_csv(summary_path, index=False)
             lookup = build_lookup_table([summary_path])
 
-        self.assertEqual(len(lookup), 3)
+        self.assertEqual(len(lookup), 4)
         linear = lookup[lookup["layer_type"] == "linear"].iloc[0]
         self.assertEqual(linear["measurement_count"], 2)
         self.assertEqual(linear["input_features"], 64)
@@ -72,3 +78,9 @@ class EnergyLookupTableTests(unittest.TestCase):
         self.assertEqual(resnet_conv["output_channels"], 64)
         self.assertEqual(resnet_conv["stride"], 2)
         self.assertEqual(resnet_conv["padding"], 3)
+
+        attention = lookup[lookup["layer_type"] == "attention"].iloc[0]
+        self.assertEqual(attention["sequence_length"], 128)
+        self.assertEqual(attention["embed_dim"], 256)
+        self.assertEqual(attention["num_heads"], 4)
+        self.assertEqual(attention["head_dim"], 64)
