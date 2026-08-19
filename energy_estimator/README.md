@@ -4,7 +4,7 @@ This directory contains the energy-estimation framework used by energyBANERA.
 It converts processed hardware measurements into differentiable estimates of
 energy per inference for Linear, Conv2d, and attention layers.
 
-The code in this directory comes from [energy_estimator](https://github.com/aissa0803/energy_estimator), adapted to this repository's CSV measurement workflow and attention experiments.
+The initial idea was inspired by [energy_estimator](https://github.com/aissa0803/energy_estimator); the code in this directory has been substantially rewritten for energyBANERA.
 
 ## Improvements over the upstream version
 
@@ -24,6 +24,9 @@ The code in this directory comes from [energy_estimator](https://github.com/aiss
 - Rejects incomplete interpolation cells, unsupported Conv2d geometry, and
   out-of-range queries by default instead of silently estimating unsupported
   configurations.
+- Precomputes and caches lookup grids, vectorizes interpolation corners, and
+  batches compatible layers through `ModelEnergyRegularizer` for repeated
+  training-step evaluation.
 
 ## Workflow
 
@@ -82,3 +85,6 @@ returned energy can be used as a training regularizer.
 
 See [the detailed design document](differentiable_energy_estimator.md) for model
 aggregation, masks, and NAS integration.
+
+See [the optimization report](optimization.md) for the original performance
+problems, implemented solutions, benchmarks, and recommended loss integration.

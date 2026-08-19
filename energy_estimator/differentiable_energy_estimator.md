@@ -89,15 +89,19 @@ attention_energy = lookup.attention(
 
 ## Model aggregation
 
-`estimate_model_energy` recursively finds `nn.Linear` and `nn.Conv2d` modules.
-Masks can be an output mask tensor or an explicit input/output mapping:
+For training, construct `ModelEnergyRegularizer` once. It recursively finds
+`nn.Linear` and `nn.Conv2d` modules, caches their metadata, and batches compatible
+layers. Masks can be an output mask tensor or an explicit input/output mapping:
 
 ```python
-from energy_estimator import estimate_model_energy
+from energy_estimator import ModelEnergyRegularizer
 
-result = estimate_model_energy(
+regularizer = ModelEnergyRegularizer(
     model,
     lookup,
+  input_shapes={"features.0": (1, 64, 224, 224)},
+)
+energy_regularizer = regularizer(
     masks={
         "features.0": {
             "input": input_channel_probabilities,
@@ -105,11 +109,14 @@ result = estimate_model_energy(
         },
         "classifier": output_feature_probabilities,
     },
-    input_shapes={"features.0": (1, 64, 224, 224)},
 )
-energy_regularizer = result["total_energy_mJ"]
 loss = task_loss + lambda_energy * energy_regularizer
 ```
+
+    Call `regularizer.estimate(masks)` when per-layer values are needed for logging.
+    The compatibility function `estimate_model_energy` constructs and scans a new
+    regularizer on every call, so it is intended for diagnostics rather than the
+    training hot path.
 
 Input masks are explicit because module registration order does not describe
 model data flow, especially around residual branches. The estimator does not
@@ -119,6 +126,9 @@ guess mask propagation. Conv input shapes are also explicit because an
 Grouped and dilated convolutions are rejected until matching experiments exist.
 Use `module_names` to avoid counting Linear projections already represented by a
 measured aggregate attention or MLP component.
+
+Batch APIs are also available for custom pruning integrations:
+`linear_batch`, `conv2d_batch`, and `attention_batch`.
 
 ## Command line
 
