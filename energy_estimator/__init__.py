@@ -2,6 +2,11 @@
 
 from .interpolation import multilinear_interpolate
 from .lookup import EnergyLookup
-from .model import estimate_model_energy
+from .model import ModelEnergyRegularizer, estimate_model_energy
 
-__all__ = ["EnergyLookup", "estimate_model_energy", "multilinear_interpolate"]
+__all__ = [
+	"EnergyLookup",
+	"ModelEnergyRegularizer",
+	"estimate_model_energy",
+	"multilinear_interpolate",
+]
