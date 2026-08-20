@@ -346,9 +346,11 @@ place for recovery. Run `automated_measurement.py` directly with
 
 ## 6. Failure and resume policy
 
-By default, the launcher stops after the first nonzero
-`automated_measurement.py` exit code. This prevents a disconnected sensor or
-incorrect board setup from invalidating hundreds of later experiments.
+By default, the launcher continues after one nonzero
+`automated_measurement.py` exit code and stops after two consecutive failures.
+A successful experiment resets the consecutive-failure count. This lets an
+isolated model failure pass while still stopping promptly for a disconnected
+sensor or incorrect board setup.
 
 To continue after failures:
 

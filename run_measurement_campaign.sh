@@ -621,6 +621,7 @@ attempted=0
 completed=0
 skipped=0
 failed=0
+consecutive_failures=0
 experiment_started=0
 interrupted=0
 
@@ -648,6 +649,11 @@ run_experiment() {
         skipped=$((skipped + 1))
         printf '  skipped: COMPLETE manifest already exists\n'
         return 0
+    fi
+
+    if ((interrupted)); then
+        printf 'Campaign interrupted by user; no next model will start.\n' >&2
+        return 130
     fi
 
     if ((DRY_RUN)); then
@@ -687,6 +693,7 @@ run_experiment() {
 
     if ((exit_code == 0)); then
         completed=$((completed + 1))
+        consecutive_failures=0
         printf '%s\t%s\tCOMPLETE\t0\t%s\n' \
             "$timestamp" "$model_path" "$log_path" >>"$SUMMARY_PATH"
         return 0
@@ -700,9 +707,15 @@ run_experiment() {
         printf 'Campaign interrupted by user; completed experiments are preserved.\n' >&2
         return 130
     fi
+    consecutive_failures=$((consecutive_failures + 1))
     if ((CONTINUE_ON_ERROR)); then
         return 0
     fi
+    if ((consecutive_failures < 2)); then
+        printf '  continuing after failure; the campaign stops after two consecutive failures\n' >&2
+        return 0
+    fi
+    printf '  stopping after %d consecutive failures\n' "$consecutive_failures" >&2
     return "$exit_code"
 }
 
