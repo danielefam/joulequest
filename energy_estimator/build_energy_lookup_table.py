@@ -126,7 +126,7 @@ def build_lookup_table(summary_paths):
         if "status" in data:
             data = data[data["status"].eq("COMPLETE")]
         if "quality_status" in data:
-            data = data[data["quality_status"].eq("OK")]
+            data = data[data["quality_status"].isin(["OK", "REVIEW"])]
 
         for row in data.to_dict(orient="records"):
             energy_mj = pd.to_numeric(row["energy_mean_mJ"], errors="coerce")

@@ -23,6 +23,12 @@ class EnergyLookupTableTests(unittest.TestCase):
                 "energy_mean_mJ": 3.0,
             },
             {
+                "model_path": "Models/CPU/Linear/Linear_64_64.pt",
+                "status": "COMPLETE",
+                "quality_status": "REVIEW",
+                "energy_mean_mJ": 5.0,
+            },
+            {
                 "model_path": "Models/CPU/Conv/Conv_3_32_3_1_16.pt",
                 "status": "COMPLETE",
                 "quality_status": "OK",
@@ -61,11 +67,11 @@ class EnergyLookupTableTests(unittest.TestCase):
 
         self.assertEqual(len(lookup), 4)
         linear = lookup[lookup["layer_type"] == "linear"].iloc[0]
-        self.assertEqual(linear["measurement_count"], 2)
+        self.assertEqual(linear["measurement_count"], 3)
         self.assertEqual(linear["input_features"], 64)
         self.assertEqual(linear["output_features"], 64)
-        self.assertEqual(linear["energy_mean_mJ"], 2.0)
-        self.assertAlmostEqual(linear["energy_stddev_mJ"], 2**0.5)
+        self.assertEqual(linear["energy_mean_mJ"], 3.0)
+        self.assertAlmostEqual(linear["energy_stddev_mJ"], 2.0)
 
         conv = lookup[(lookup["input_channels"] == 3) & (lookup["output_channels"] == 16)].iloc[0]
         self.assertEqual(conv["input_image_size"], 32)
