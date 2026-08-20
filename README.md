@@ -109,14 +109,17 @@ Use a model file that exists on your computer. The model name tells the program 
 - `base_runner.py`: defines the common timed-burst runner contract.
 - `runner.py`: runs the model on CPU, CUDA, or Edge TPU.
 - `ina226_serial_logger.py`: saves measurements directly from the INA226 device to a CSV file.
-- `energy_estimator/`: differentiable Linear, Conv2d, and attention energy estimates from processed lookup tables.
 - `banera_pt_requirements.txt`: saved Python environment for PyTorch CPU/CUDA work.
 - `banera_tf_requirements.txt`: saved Python environment for TensorFlow/Edge TPU work.
 - `tests/`: automated checks for the code.
 - `docs_new/`: longer project notes and measurement documentation.
 
-See [energy_estimator/differentiable_energy_estimator.md](energy_estimator/differentiable_energy_estimator.md)
-for lookup generation, interpolation behavior, and NAS regularization examples.
+Differentiable Linear, Conv2d, and attention energy estimates from processed
+lookup tables are provided by the standalone `joulegrad` package
+(sibling checkout at `../joulegrad`), consumed as an external
+dependency. See [docs_new/joulegrad_energy_estimation.md](docs_new/joulegrad_energy_estimation.md)
+and its `differentiable_energy_estimator.md` for lookup
+generation, interpolation behavior, and NAS regularization examples.
 
 ## Configuration
 
@@ -310,7 +313,7 @@ Create a table for the downstream energy-inference program from one or more
 processed board summaries:
 
 ```bash
-python -m energy_estimator.build_energy_lookup_table \
+python -m joulegrad.build_energy_lookup_table \
   measurements/Plot/pi5/summary.csv \
   --output measurements/Plot/pi5/energy_lookup_table.csv
 ```
