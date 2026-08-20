@@ -1,6 +1,4 @@
-# VoltVibe
-
-Catch the power vibe of your hardware.
+<h1>VoltVibe<br><small><small><small>Catch the energy behind the run</small></small></small></h1>
 
 This project runs small AI-model tests and measures their power use with an
 INA226EVM connected through a TI-SCB serial device.
