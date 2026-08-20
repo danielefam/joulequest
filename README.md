@@ -1,4 +1,4 @@
-<h1>VoltVibe<br><sub><sub>Catch the energy behind the run</sub></sub></h1>
+<h1>WattWatch<br><sub><sub>Watch the energy behind every run</sub></sub></h1>
 
 This project runs small AI-model tests and measures their power use with an
 INA226EVM connected through a TI-SCB serial device.
