@@ -1,4 +1,4 @@
-<h1>VoltVibe<br><sub><sub>Catch the energy behind the run</sub></sub></h1>
+<h1>JouleQuest<br><sub><sub>Explore the energy behind every run.</sub></sub></h1>
 
 This project runs small AI-model tests and measures their power use with an
 INA226EVM connected through a TI-SCB serial device.
@@ -203,7 +203,7 @@ Copy only the inference-side scripts:
 ```bash
 scp run_manager.py runner.py base_runner.py \
   -o ProxyJump=JUMP_USER@JUMP_HOST \
-  BENCH_USER@INFERENCE_HOST:/path/to/VoltVibe/
+  BENCH_USER@INFERENCE_HOST:/path/to/JouleQuest/
 ```
 
 Keep these scripts on the PC:
