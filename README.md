@@ -1,5 +1,7 @@
 # VoltVibe
 
+Catch the power vibe of your hardware.
+
 This project runs small AI-model tests and measures their power use with an
 INA226EVM connected through a TI-SCB serial device.
 
