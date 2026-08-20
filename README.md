@@ -1,4 +1,4 @@
-<h1>JouleQuest<br><sub><sub>Explore the energy behind every run.</sub></sub></h1>
+<h1>JouleQuest<br><sub><sub>Explore the energy behind every run</sub></sub></h1>
 
 This project runs small AI-model tests and measures their power use with an
 INA226EVM connected through a TI-SCB serial device.
