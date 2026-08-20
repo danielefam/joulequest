@@ -1,4 +1,4 @@
-# energyBANERA
+# VoltVibe
 
 This project runs small AI-model tests and measures their power use with an
 INA226EVM connected through a TI-SCB serial device.
@@ -203,7 +203,7 @@ Copy only the inference-side scripts:
 ```bash
 scp run_manager.py runner.py base_runner.py \
   -o ProxyJump=JUMP_USER@JUMP_HOST \
-  BENCH_USER@INFERENCE_HOST:/path/to/energyBANERA/
+  BENCH_USER@INFERENCE_HOST:/path/to/VoltVibe/
 ```
 
 Keep these scripts on the PC:
