@@ -13,5 +13,6 @@ docs_new/*
 !docs_new/cli_acquisition_report.md
 !docs_new/run_manager_update.md
 !docs_new/experiment_campaign.md
+!docs_new/joulegrad_energy_estimation.md
 measurement_hosts.local.json
 *.ipynb
