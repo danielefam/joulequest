@@ -69,16 +69,26 @@ EXPERIMENT_COOLDOWN_SECONDS="${EXPERIMENT_COOLDOWN_SECONDS:-10}"
 
 LINEAR_SIZES="${LINEAR_SIZES:-64 128 256 512 1024 2048 4096 8192}"
 
-# The protocol table displays input channels as rows and image sizes as
-# columns. To avoid implausibly expensive high-channel/high-resolution cases,
-# the campaign caps each input-channel range at a realistic maximum resolution.
-# CONV_IMAGE_SIZES remains a global filter over those allowed resolutions.
-# Filenames deliberately use the runner convention:
-# Conv_<input_channels>_<image_size>_<kernel_size>_<padding>.pt
+# Additional low-feature knots extend the original Linear square without
+# removing any existing experiment. Every pair where at least one side is an
+# extra value is scheduled: (8 + 3)^2 - 8^2 = 57 new Linear experiments.
+LINEAR_PRUNING_EXTRA_SIZES="${LINEAR_PRUNING_EXTRA_SIZES:-1 8 32}"
+
+# Original generic Conv matrix. The protocol table displays input channels as
+# rows and image sizes as columns. High-channel/high-resolution combinations
+# retain their conservative cap through conv_max_image_size().
 CONV_INPUT_CHANNELS="${CONV_INPUT_CHANNELS:-1 2 4 8 16 32 64 128 256 512}"
 CONV_OUTPUT_CHANNELS="${CONV_OUTPUT_CHANNELS:-1 8 16 32 64 128 256 512}"
 CONV_IMAGE_SIZES="${CONV_IMAGE_SIZES:-32 64 128 256 512 1024}"
 CONV_KERNEL_PADDING="${CONV_KERNEL_PADDING:-3:0 3:1 5:0 5:1}"
+
+# Additive architecture-neutral pruning points, still using only basic Conv
+# models. The spatial extreme at size 2 adds 80 complete 3x3/pad1 channel
+# points over the original axes. A separate complete 1x1/pad0 grid adds 64
+# points over log-spaced channels and small/intermediate spatial sizes.
+CONV_PRUNING_SMALL_IMAGE_SIZES="${CONV_PRUNING_SMALL_IMAGE_SIZES:-2}"
+CONV_PRUNING_POINTWISE_CHANNELS="${CONV_PRUNING_POINTWISE_CHANNELS:-1 8 64 512}"
+CONV_PRUNING_POINTWISE_IMAGE_SIZES="${CONV_PRUNING_POINTWISE_IMAGE_SIZES:-2 8 32 64}"
 
 # Self-attention is measured at batch size 1. Every embedding dimension is
 # paired with head dimensions 32, 64, and 128; the head count is d / d_head.
@@ -490,10 +500,14 @@ command -v "$PYTHON_BIN" >/dev/null 2>&1 ||
     die "Python executable not found: $PYTHON_BIN"
 
 read -r -a LINEAR_SIZE_LIST <<<"$LINEAR_SIZES"
+read -r -a LINEAR_PRUNING_EXTRA_SIZE_LIST <<<"$LINEAR_PRUNING_EXTRA_SIZES"
 read -r -a CONV_INPUT_CHANNEL_LIST <<<"$CONV_INPUT_CHANNELS"
 read -r -a CONV_OUTPUT_CHANNEL_LIST <<<"$CONV_OUTPUT_CHANNELS"
 read -r -a CONV_IMAGE_SIZE_LIST <<<"$CONV_IMAGE_SIZES"
 read -r -a CONV_KERNEL_PADDING_LIST <<<"$CONV_KERNEL_PADDING"
+read -r -a CONV_PRUNING_SMALL_IMAGE_SIZE_LIST <<<"$CONV_PRUNING_SMALL_IMAGE_SIZES"
+read -r -a CONV_PRUNING_POINTWISE_CHANNEL_LIST <<<"$CONV_PRUNING_POINTWISE_CHANNELS"
+read -r -a CONV_PRUNING_POINTWISE_IMAGE_SIZE_LIST <<<"$CONV_PRUNING_POINTWISE_IMAGE_SIZES"
 read -r -a ATTENTION_SEQUENCE_LENGTH_LIST <<<"$ATTENTION_SEQUENCE_LENGTHS"
 read -r -a ATTENTION_EMBED_DIM_LIST <<<"$ATTENTION_EMBED_DIMS"
 read -r -a ATTENTION_HEAD_DIM_LIST <<<"$ATTENTION_HEAD_DIMS"
@@ -508,8 +522,12 @@ for input_channels in "${CONV_INPUT_CHANNEL_LIST[@]}"; do
     done
 done
 
-for value in "${LINEAR_SIZE_LIST[@]}" "${CONV_INPUT_CHANNEL_LIST[@]}" \
+for value in "${LINEAR_SIZE_LIST[@]}" "${LINEAR_PRUNING_EXTRA_SIZE_LIST[@]}" \
+    "${CONV_INPUT_CHANNEL_LIST[@]}" \
     "${CONV_OUTPUT_CHANNEL_LIST[@]}" "${CONV_IMAGE_SIZE_LIST[@]}" \
+    "${CONV_PRUNING_SMALL_IMAGE_SIZE_LIST[@]}" \
+    "${CONV_PRUNING_POINTWISE_CHANNEL_LIST[@]}" \
+    "${CONV_PRUNING_POINTWISE_IMAGE_SIZE_LIST[@]}" \
     "${ATTENTION_SEQUENCE_LENGTH_LIST[@]}" "${ATTENTION_EMBED_DIM_LIST[@]}" \
     "${ATTENTION_HEAD_DIM_LIST[@]}"; do
     [[ "$value" =~ ^[1-9][0-9]*$ ]] ||
@@ -580,10 +598,14 @@ lenet_total=0
 resnet18_total=0
 resnet50_total=0
 if suite_is_selected linear; then
-    linear_total=$((${#LINEAR_SIZE_LIST[@]} * ${#LINEAR_SIZE_LIST[@]}))
+    linear_axis_total=$((${#LINEAR_SIZE_LIST[@]} + ${#LINEAR_PRUNING_EXTRA_SIZE_LIST[@]}))
+    linear_total=$((linear_axis_total * linear_axis_total))
 fi
 if suite_is_selected conv; then
-    conv_total=$((conv_image_pair_total * ${#CONV_OUTPUT_CHANNEL_LIST[@]} * ${#CONV_KERNEL_PADDING_LIST[@]}))
+    base_conv_total=$((conv_image_pair_total * ${#CONV_OUTPUT_CHANNEL_LIST[@]} * ${#CONV_KERNEL_PADDING_LIST[@]}))
+    small_spatial_total=$((${#CONV_INPUT_CHANNEL_LIST[@]} * ${#CONV_OUTPUT_CHANNEL_LIST[@]} * ${#CONV_PRUNING_SMALL_IMAGE_SIZE_LIST[@]}))
+    pointwise_total=$((${#CONV_PRUNING_POINTWISE_CHANNEL_LIST[@]} ** 2 * ${#CONV_PRUNING_POINTWISE_IMAGE_SIZE_LIST[@]}))
+    conv_total=$((base_conv_total + small_spatial_total + pointwise_total))
 fi
 if suite_is_selected attention; then
     attention_total=$((${#ATTENTION_SEQUENCE_LENGTH_LIST[@]} * ${#ATTENTION_EMBED_DIM_LIST[@]} * ${#ATTENTION_HEAD_DIM_LIST[@]}))
@@ -645,6 +667,11 @@ run_experiment() {
     attempted=$((attempted + 1))
     printf '[%d/%d] %s\n' "$attempted" "$total" "$model_path"
 
+    if ((DRY_RUN)); then
+        print_command "${command[@]}"
+        return 0
+    fi
+
     if ((REPEAT_COMPLETED == 0)) && manifest_exists_for_model "$model_path" "$batch_size"; then
         skipped=$((skipped + 1))
         printf '  skipped: COMPLETE manifest already exists\n'
@@ -654,11 +681,6 @@ run_experiment() {
     if ((interrupted)); then
         printf 'Campaign interrupted by user; no next model will start.\n' >&2
         return 130
-    fi
-
-    if ((DRY_RUN)); then
-        print_command "${command[@]}"
-        return 0
     fi
 
     if ((experiment_started)) && is_positive_number "$EXPERIMENT_COOLDOWN_SECONDS"; then
@@ -727,6 +749,24 @@ if suite_is_selected linear; then
                 "$LINEAR_CONV_BATCH_SIZE"
         done
     done
+    linear_pruning_axis=(
+        "${LINEAR_SIZE_LIST[@]}"
+        "${LINEAR_PRUNING_EXTRA_SIZE_LIST[@]}"
+    )
+    for input_size in "${linear_pruning_axis[@]}"; do
+        for output_size in "${linear_pruning_axis[@]}"; do
+            input_is_extra=0
+            output_is_extra=0
+            for extra_size in "${LINEAR_PRUNING_EXTRA_SIZE_LIST[@]}"; do
+                ((input_size == extra_size)) && input_is_extra=1
+                ((output_size == extra_size)) && output_is_extra=1
+            done
+            ((input_is_extra || output_is_extra)) || continue
+            run_experiment \
+                "${LINEAR_MODEL_DIRECTORY}/Linear_${input_size}_${output_size}${MODEL_SUFFIX}" \
+                "$LINEAR_CONV_BATCH_SIZE"
+        done
+    done
 fi
 
 if suite_is_selected conv; then
@@ -742,6 +782,29 @@ if suite_is_selected conv; then
                         "${CONV_MODEL_DIRECTORY}/Conv_${input_channels}_${image_size}_${kernel_size}_${padding}_${output_channels}${MODEL_SUFFIX}" \
                         "$LINEAR_CONV_BATCH_SIZE"
                 done
+            done
+        done
+    done
+
+    # Complete low-spatial boundary for the most common shape-preserving 3x3
+    # convolution, over all original input/output channel values.
+    for image_size in "${CONV_PRUNING_SMALL_IMAGE_SIZE_LIST[@]}"; do
+        for input_channels in "${CONV_INPUT_CHANNEL_LIST[@]}"; do
+            for output_channels in "${CONV_OUTPUT_CHANNEL_LIST[@]}"; do
+                run_experiment \
+                    "${CONV_MODEL_DIRECTORY}/Conv_${input_channels}_${image_size}_3_1_${output_channels}${MODEL_SUFFIX}" \
+                    "$LINEAR_CONV_BATCH_SIZE"
+            done
+        done
+    done
+
+    # Complete pointwise Conv grid for channel-changing pruning paths.
+    for image_size in "${CONV_PRUNING_POINTWISE_IMAGE_SIZE_LIST[@]}"; do
+        for input_channels in "${CONV_PRUNING_POINTWISE_CHANNEL_LIST[@]}"; do
+            for output_channels in "${CONV_PRUNING_POINTWISE_CHANNEL_LIST[@]}"; do
+                run_experiment \
+                    "${CONV_MODEL_DIRECTORY}/Conv_${input_channels}_${image_size}_1_0_${output_channels}${MODEL_SUFFIX}" \
+                    "$LINEAR_CONV_BATCH_SIZE"
             done
         done
     done

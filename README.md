@@ -258,6 +258,10 @@ manifest.
 Campaign parameters and matrices can be edited at the beginning of the script
 or overridden with environment variables. See
 `docs_new/experiment_campaign.md` for the complete matrix and examples.
+The original Linear/Conv matrices remain intact. The launcher additionally
+schedules 201 pruning-oriented basic-layer points: 57 low-feature Linear
+combinations, 80 small-spatial `3x3` Conv points, and a 64-point `1x1` Conv
+grid. Reusing the same board label skips already completed original points.
 
 ## Process campaign results
 

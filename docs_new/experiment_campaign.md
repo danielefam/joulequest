@@ -1,6 +1,6 @@
 # One-board Experiment Campaign
 
-**Document date:** 2026-07-24  
+**Document date:** 2026-08-22
 **Launcher:** `run_measurement_campaign.sh`
 
 ## 1. Separation of responsibilities
@@ -34,6 +34,16 @@ $$
 8 \times 8 = 64\text{ Linear experiments}
 $$
 
+The pruning extension adds low-feature knots:
+
+```text
+1 8 32
+```
+
+The launcher measures every pair on the combined 11-value axis, while avoiding
+duplicates from the original square. This adds 57 points and gives 121 Linear
+experiments in a fresh campaign.
+
 Each generated model path follows:
 
 ```text
@@ -53,8 +63,8 @@ The protocol table displays:
 - **rows:** input-channel count;
 - **columns:** square image size.
 
-Each combination is measured at the output-channel widths used by common CNN
-width ladders.
+The original architecture-neutral matrix remains unchanged. Additional
+pruning points extend its lower spatial and pointwise-convolution boundaries.
 
 The naming convention does not follow visual row/column position. It follows
 the runner parser exactly:
@@ -75,21 +85,15 @@ Image-size values (table columns):
 32 64 128 256 512 1024
 ```
 
-The launcher applies a conservative resolution cap based on input channels, so
-the listed values are not a full Cartesian product:
+The original channel-dependent resolution caps remain in force:
 
 | Input channels | Maximum image size |
 | --- | ---: |
 | 1-8 | 1024 |
 | 16-32 | 512 |
-| 64 | 256 |
-| 128 | 256 |
+| 64-128 | 256 |
 | 256 | 128 |
 | 512 or more | 64 |
-
-This retains realistic high-resolution, low-channel cases while excluding
-improbably expensive high-channel, high-resolution cases. The launcher still
-uses batch size `1` for Conv measurements by default.
 
 Output-channel values:
 
@@ -103,18 +107,36 @@ Kernel/padding pairs:
 3:0 3:1 5:0 5:1
 ```
 
-With the default channel-dependent resolution caps, the suite contains:
+The original suite contains:
 
 $$
 47 \times 8 \times 4 = 1504\text{ Conv experiments}
 $$
 
-For example, the table cell at input-channel row `2`, image-size column `64`,
-with kernel `5`, padding `1`, and `64` output channels becomes:
+The pruning extension adds, without replacing those points:
+
+- 80 `3x3`, padding-1 points at spatial size `2`, using every original input
+  and output channel value;
+- a complete 64-point `1x1`, padding-0 grid over channels
+  `{1, 8, 64, 512}` and spatial sizes `{2, 8, 32, 64}`.
+
+This adds 144 Conv experiments and gives 1,648 Conv experiments in a fresh
+campaign. For example:
 
 ```text
-Models/CUDA/Conv/Conv_2_64_5_1_64.pt
+Models/CUDA/Conv/Conv_8_2_3_1_64.pt
+Models/CUDA/Conv/Conv_8_32_1_0_64.pt
 ```
+
+Run the basic-layer campaign with:
+
+```bash
+./run_measurement_campaign.sh --board BOARD_LABEL --suite linear,conv
+```
+
+This schedules 1,769 unique paths in a fresh output directory. If the original
+campaign has already completed under the same board label, resume detection
+skips those manifests and executes only the 201 new pruning points.
 
 ### Self-Attention layers
 
@@ -128,8 +150,8 @@ Attention_<sequence_length>_<embed_dim>_<num_heads>.pt
 It sweeps these values:
 
 ```text
-sequence lengths: 16 32 64 128 256 512 1024
-embedding dimensions: 128 256 384 512 768 1024
+sequence lengths: 128 256 512 1024 2048
+embedding dimensions: 128 256 384 512 768 1024 4096
 head dimensions: 32 64 128
 ```
 
@@ -137,7 +159,7 @@ For each embedding and head dimension, the launcher derives the number of
 heads as $h=d/d_{head}$. This produces:
 
 $$
-7 \times 6 \times 3 = 126\text{ SelfAttention experiments}
+5 \times 7 \times 3 = 105\text{ SelfAttention experiments}
 $$
 
 ### Rotary Self-Attention layers
@@ -152,7 +174,7 @@ RotaryAttention_<sequence_length>_<embed_dim>_<embed_dim / 64>.pt
 It contains:
 
 $$
-7 \times 6 = 42\text{ RotaryAttention experiments}
+5 \times 7 = 35\text{ RotaryAttention experiments}
 $$
 
 The default `all` suite includes Linear, Conv, SelfAttention,
@@ -161,7 +183,7 @@ Multiple suites can be combined in one comma-separated value, such as
 `all,resnet18,resnet50`. The default contains:
 
 $$
-64 + 1504 + 126 + 42 + 12 = 1748\text{ experiments per board}
+121 + 1648 + 105 + 35 + 12 = 1921\text{ experiments per board}
 $$
 
 ## 3. Basic commands
@@ -267,12 +289,16 @@ The matrix variables are:
 
 ```bash
 LINEAR_SIZES="64 128 256 512 1024 2048 4096 8192"
+LINEAR_PRUNING_EXTRA_SIZES="1 8 32"
 CONV_INPUT_CHANNELS="1 2 4 8 16 32 64 128 256 512"
 CONV_OUTPUT_CHANNELS="1 8 16 32 64 128 256 512"
 CONV_IMAGE_SIZES="32 64 128 256 512 1024"
 CONV_KERNEL_PADDING="3:0 3:1 5:0 5:1"
-ATTENTION_SEQUENCE_LENGTHS="16 32 64 128 256 512 1024"
-ATTENTION_EMBED_DIMS="128 256 384 512 768 1024"
+CONV_PRUNING_SMALL_IMAGE_SIZES="2"
+CONV_PRUNING_POINTWISE_CHANNELS="1 8 64 512"
+CONV_PRUNING_POINTWISE_IMAGE_SIZES="2 8 32 64"
+ATTENTION_SEQUENCE_LENGTHS="128 256 512 1024 2048"
+ATTENTION_EMBED_DIMS="128 256 384 512 768 1024 4096"
 ATTENTION_HEAD_DIMS="32 64 128"
 ```
 
@@ -301,11 +327,15 @@ channels `1`.
 A reduced validation matrix can use:
 
 ```bash
-LINEAR_SIZES="64 128" \
-CONV_INPUT_CHANNELS="1 2" \
-CONV_OUTPUT_CHANNELS="1 8" \
-CONV_IMAGE_SIZES="32 64" \
-CONV_KERNEL_PADDING="3:0" \
+LINEAR_SIZES="1 128" \
+LINEAR_PRUNING_EXTRA_SIZES="8" \
+CONV_INPUT_CHANNELS="1 64" \
+CONV_OUTPUT_CHANNELS="1 64" \
+CONV_IMAGE_SIZES="32" \
+CONV_KERNEL_PADDING="3:1" \
+CONV_PRUNING_SMALL_IMAGE_SIZES="2" \
+CONV_PRUNING_POINTWISE_CHANNELS="1 64" \
+CONV_PRUNING_POINTWISE_IMAGE_SIZES="2 32" \
   ./run_measurement_campaign.sh --board TEST_LABEL --suite all --dry-run
 ```
 
