@@ -114,12 +114,10 @@ Use a model file that exists on your computer. The model name tells the program 
 - `tests/`: automated checks for the code.
 - `docs_new/`: longer project notes and measurement documentation.
 
-Differentiable Linear, Conv2d, and attention energy estimates from processed
-lookup tables are provided by the standalone `joulegrad` package
-(sibling checkout at `../joulegrad`), consumed as an external
-dependency. See [docs_new/joulegrad_energy_estimation.md](docs_new/joulegrad_energy_estimation.md)
-and its `differentiable_energy_estimator.md` for lookup
-generation, interpolation behavior, and NAS regularization examples.
+JouleQuest owns measurement processing and lookup-table generation.
+Differentiable Linear, Conv2d, and attention interpolation over the resulting
+CSV is provided by the independent `joulegrad` Python API. See
+[docs_new/joulegrad_energy_estimation.md](docs_new/joulegrad_energy_estimation.md).
 
 ## Configuration
 
@@ -317,7 +315,7 @@ Create a table for the downstream energy-inference program from one or more
 processed board summaries:
 
 ```bash
-python -m joulegrad.build_energy_lookup_table \
+python -m processing_report.build_energy_lookup_table \
   measurements/Plot/pi5/summary.csv \
   --output measurements/Plot/pi5/energy_lookup_table.csv
 ```
@@ -327,7 +325,8 @@ The output has one row per measured layer configuration. Linear rows use
 `input_channels`, `output_channels`, `input_image_size`, `kernel_size`,
 `stride`, and `padding`. `energy_mean_mJ` is the mean energy per input sample,
 while `measurement_count` and `energy_stddev_mJ` retain repeatability data for
-the inference program. Only `COMPLETE` and `OK` campaigns are included.
+the inference program. Only complete, quality-approved, positive, internally
+consistent campaigns are included.
 
 ## More help
 

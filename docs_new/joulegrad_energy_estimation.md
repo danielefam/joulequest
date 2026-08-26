@@ -1,87 +1,51 @@
-# Differentiable energy estimation: moved to joulegrad
+# Energy lookup production and consumption
 
-The differentiable energy estimator that used to live in this repository's
-`energy_estimator/` directory has been extracted into a standalone package:
-**joulegrad**.
+JouleQuest owns the complete measurement-to-lookup pipeline:
 
-## Where it lives now
+1. acquire hardware power samples;
+2. process runs into one `summary.csv` per hardware/configuration;
+3. validate campaign quality and timing consistency; and
+4. aggregate accepted layer measurements into `energy_lookup_table.csv`.
 
-- Sibling checkout: `../joulegrad` (package import name: `joulegrad`,
-  distribution name: `joulegrad`).
-- Install it into the `banera_pt` environment with:
-
-  ```bash
-  conda run -n banera_pt python -m pip install -e ../joulegrad
-  ```
-
-- Once published, install a pinned release instead, e.g.
-  `pip install "joulegrad @ git+ssh://git@github.com/danielefam/joulegrad.git@v0.1.0"`.
-
-## What this repository still owns
-
-JouleQuest (this repository) captures and processes the hardware measurements:
-INA226 acquisition, adaptive burst runs, data processing, and the per-board
-`summary.csv` files. joulegrad consumes those summaries; it does not replace
-any measurement code here.
-
-## Building a lookup table
-
-The builder moved with the package. From one processed summary per
-board/configuration:
+Create the table from one or more summaries belonging to the same hardware and
+software configuration:
 
 ```bash
-conda run -n banera_pt python -m joulegrad.build_energy_lookup_table \
+python -m processing_report.build_energy_lookup_table \
   measurements/Plot/pi5/summary.csv \
   --output measurements/Plot/pi5/energy_lookup_table.csv
 ```
 
+Never mix boards, runtimes, batches, dtypes, power modes, or acquisition
+policies in one table.
 
+## Consumer boundary
 
-
-After generating the lookup table, query the estimated energy of a layer
-directly from the JouleQuest directory. For example, this estimates a linear
-layer with 130 input features and 162 output features:
-
-```bash
-conda run -n banera_pt python -m joulegrad \
-  measurements/Plot/pi5/energy_lookup_table.csv \
-  linear 130 162
-```
-
-The command prints the estimated energy per inference, for example:
-
-```text
-0.128964165565 mJ/inference
-```
-
-The same command supports `conv` and `attention` layer queries. Run
-`conda run -n banera_pt python -m joulegrad --help` for their arguments.
-
-The strict acceptance policy is unchanged: only `COMPLETE` campaigns with
-quality `OK`/`REVIEW`, positive energies, matching cycle counts, and valid
-clock-alignment uncertainty. One lookup per board/runtime configuration — never
-merged.
-
-## Using the estimate in training
+JouleGrad is an independent API-only package. It consumes the generated CSV;
+it does not import JouleQuest, parse summaries, or provide a lookup-builder
+command.
 
 ```python
-from joulegrad import EnergyLookup, ModelEnergyRegularizer
+from joulegrad import EnergyEstimator
 
-lookup = EnergyLookup("measurements/Plot/pi5/energy_lookup_table.csv",
-                      out_of_range="error")
-regularizer = ModelEnergyRegularizer(model, lookup)
-energy_mj = regularizer(masks)
-loss = task_loss + energy_weight * energy_mj
+estimator = EnergyEstimator(
+    "measurements/Plot/pi5/energy_lookup_table.csv",
+    out_of_range="error",
+)
+energy_mj = estimator.linear(130, 162)
 ```
 
-The jouleNAS project (`../jouleNAS`, formerly `ecological_nas`) already
-consumes joulegrad through its explicit topology bridges.
+The estimate is a differentiable PyTorch tensor in millijoules per input
+sample. Consult JouleGrad's `docs/LOOKUP_SCHEMA.md` and `docs/API.md` for the
+consumer contract and interpolation policies.
 
-## Full documentation
+## Accepted measurements
 
-See the joulegrad repository:
+The producer accepts complete rows with quality `OK` or `REVIEW`, positive
+energy, matching detected/expected regions when available, a complete/aligned
+clock status when available, and uncertainty within its threshold when those
+columns are present.
 
-- `README.md` — overview and workflow;
-- `differentiable_energy_estimator.md` — integration contract;
-- `optimization.md` — performance design (prepared grids, device caches,
-  batched evaluation).
+Recognized model names include Linear, Conv, ResNetConv, Attention, and
+RotaryAttention configurations. Repeated coordinates are aggregated into mean,
+standard deviation, and measurement count.
