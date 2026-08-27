@@ -317,7 +317,7 @@ processed board summaries:
 ```bash
 python -m processing_report.build_energy_lookup_table \
   measurements/Plot/pi5/summary.csv \
-  --output measurements/Plot/pi5/energy_lookup_table.csv
+  --output measurements/Plot/pi5/pi5_energy_lookup.csv
 ```
 
 The output has one row per measured layer configuration. Linear rows use
