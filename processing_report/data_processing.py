@@ -26,9 +26,9 @@ class ProcessingConfig:
     """Fractions are values from 0 to 1, while durations are in seconds."""
 
     sampling_rate_hz: float | None = None
-    tail_trim_fraction: float = 0.01
-    discard_initial_samples: bool = False
-    initial_trim_fraction: float = 0.01
+    tail_trim_fraction: float = 0.10
+    discard_initial_samples: bool = True
+    initial_trim_fraction: float = 0.10
     min_inferences_for_trimming: int = 10
     filter_after_discard: bool = False
     hampel_window_seconds: float = 0.21
@@ -841,18 +841,19 @@ def build_parser():
     parser.add_argument(
         "--tail-trim-percentage",
         type=float,
-        default=1.0,
+        default=10.0,
         help="Percentage removed from each power tail in every active region.",
     )
     parser.add_argument(
         "--discard-initial-samples",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help="Also discard the first samples of every active region.",
     )
     parser.add_argument(
         "--initial-trim-percentage",
         type=float,
-        default=1.0,
+        default=10.0,
         help="Initial time-ordered percentage removed when its flag is set.",
     )
     parser.add_argument(

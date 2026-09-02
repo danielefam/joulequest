@@ -3,7 +3,7 @@
 JouleQuest owns the complete measurement-to-lookup pipeline:
 
 1. acquire hardware power samples;
-2. process runs into one `summary.csv` per hardware/configuration;
+2. process runs into one summary per hardware/configuration in `measurements/summaries/`;
 3. validate campaign quality and timing consistency; and
 4. aggregate accepted layer measurements into `energy_lookup_table.csv`.
 
@@ -12,7 +12,7 @@ software configuration:
 
 ```bash
 python -m processing_report.build_energy_lookup_table \
-  measurements/Plot/pi5/summary.csv \
+  measurements/summaries/pi5.csv \
   --output measurements/Plot/pi5/energy_lookup_table.csv
 ```
 

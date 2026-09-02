@@ -272,11 +272,33 @@ def print_resnet18(path, batch=8, label="Nano"):
         print("Comparison unavailable because complete or component data is missing.")
 
 
+def _default_summary_path(name, legacy_subpath):
+    summaries_path = Path("measurements/summaries") / f"{name}.csv"
+    if summaries_path.is_file():
+        return summaries_path
+    legacy_path = Path(f"measurements/Plot/{legacy_subpath}/summary.csv")
+    if legacy_path.is_file():
+        return legacy_path
+    return summaries_path
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--nano-summary", type=Path, default=Path("measurements/Plot/nano_base/summary.csv"))
-    parser.add_argument("--pi5-summary", type=Path, default=Path("measurements/Plot/pi5/summary.csv"))
-    parser.add_argument("--agx-orin-summary", type=Path, default=Path("measurements/Plot/agx_orin/summary.csv"))
+    parser.add_argument(
+        "--nano-summary",
+        type=Path,
+        default=_default_summary_path("nano_base", "nano_base"),
+    )
+    parser.add_argument(
+        "--pi5-summary",
+        type=Path,
+        default=_default_summary_path("pi5", "pi5"),
+    )
+    parser.add_argument(
+        "--agx-orin-summary",
+        type=Path,
+        default=_default_summary_path("agx_orin", "agx_orin"),
+    )
     parser.add_argument("--batches", nargs="+", type=int, default=[1, 16, 64, 128])
     args = parser.parse_args()
 

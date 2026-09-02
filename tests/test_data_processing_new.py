@@ -86,7 +86,9 @@ class TailTrimProcessingTests(unittest.TestCase):
 
             result = process_measurement(
                 csv_path,
-                config=ProcessingConfig(tail_trim_fraction=0.1),
+                config=ProcessingConfig(
+                    tail_trim_fraction=0.1, discard_initial_samples=False
+                ),
             )
 
         region = result.regions.iloc[0]
@@ -128,7 +130,9 @@ class TailTrimProcessingTests(unittest.TestCase):
 
             result = process_measurement(
                 csv_path,
-                config=ProcessingConfig(tail_trim_fraction=0.1),
+                config=ProcessingConfig(
+                    tail_trim_fraction=0.1, discard_initial_samples=False
+                ),
             )
 
         region = result.regions.iloc[0]
@@ -323,12 +327,15 @@ class TailTrimProcessingTests(unittest.TestCase):
 
             unfiltered = process_measurement(
                 csv_path,
-                config=ProcessingConfig(tail_trim_fraction=0.1),
+                config=ProcessingConfig(
+                    tail_trim_fraction=0.1, discard_initial_samples=False
+                ),
             )
             filtered = process_measurement(
                 csv_path,
                 config=ProcessingConfig(
                     tail_trim_fraction=0.1,
+                    discard_initial_samples=False,
                     filter_after_discard=True,
                     hampel_window_seconds=0.3,
                     rolling_window_seconds=0.3,
@@ -351,6 +358,22 @@ class TailTrimProcessingTests(unittest.TestCase):
             filtered.regions.iloc[0]["energy_per_cycle_J"],
             unfiltered.regions.iloc[0]["energy_per_cycle_J"],
         )
+
+    def test_default_trimming_configuration_and_cli_defaults(self):
+        default_config = ProcessingConfig()
+        self.assertEqual(default_config.tail_trim_fraction, 0.10)
+        self.assertTrue(default_config.discard_initial_samples)
+        self.assertEqual(default_config.initial_trim_fraction, 0.10)
+
+        data_parser_args = build_parser().parse_args(["capture.csv"])
+        self.assertEqual(data_parser_args.tail_trim_percentage, 10.0)
+        self.assertTrue(data_parser_args.discard_initial_samples)
+        self.assertEqual(data_parser_args.initial_trim_percentage, 10.0)
+
+        batch_parser_args = process_and_visualize.build_parser().parse_args([])
+        self.assertEqual(batch_parser_args.tail_trim_percentage, 10.0)
+        self.assertTrue(batch_parser_args.discard_initial_samples)
+        self.assertEqual(batch_parser_args.initial_trim_percentage, 10.0)
 
     def test_filter_after_discard_cli_flag_is_optional(self):
         parser = build_parser()
@@ -389,6 +412,33 @@ class TailTrimProcessingTests(unittest.TestCase):
         self.assertEqual(config.hampel_sigma, 3.5)
         self.assertEqual(config.rolling_window_seconds, 0.11)
         self.assertEqual(config.max_clock_uncertainty_fraction, 0.25)
+
+    def test_batch_processor_summary_and_plot_directories(self):
+        args = process_and_visualize.build_parser().parse_args(
+            [
+                "--data-dir", "measurements/runs/pi5",
+                "--output-name", "pi5_custom.csv",
+            ]
+        )
+        self.assertEqual(
+            args.summary_dir,
+            process_and_visualize.REPOSITORY_ROOT / "measurements" / "summaries",
+        )
+        self.assertEqual(args.output_name, "pi5_custom.csv")
+        self.assertIsNone(args.plot_dir)
+
+    def test_batch_processor_custom_summary_dir_and_alias(self):
+        args = process_and_visualize.build_parser().parse_args(
+            [
+                "--data-dir", "measurements/runs/pi5",
+                "--summary-dir", "measurements/results",
+                "--summary-name", "pi5_summary",
+                "--plot-dir", "measurements/Plot/pi5",
+            ]
+        )
+        self.assertEqual(args.summary_dir, Path("measurements/results"))
+        self.assertEqual(args.summary_name, "pi5_summary")
+        self.assertEqual(args.plot_dir, Path("measurements/Plot/pi5"))
 
 
 if __name__ == "__main__":

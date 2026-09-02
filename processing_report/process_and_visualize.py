@@ -35,10 +35,34 @@ def build_parser():
         help="Directory containing measurement CSV files.",
     )
     parser.add_argument(
+        "--plot-dir",
+        type=Path,
+        default=None,
+        help="Directory receiving plot PDFs; defaults to measurements/Plot/<data_dir_name>.",
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
-        default=REPOSITORY_ROOT / "measurements" / "Plot" / "nano_base",
+        default=None,
+        help="Directory receiving plot PDFs (alias for --plot-dir).",
+    )
+    parser.add_argument(
+        "--summary-dir",
+        type=Path,
+        default=REPOSITORY_ROOT / "measurements" / "summaries",
         help="Directory receiving the summary CSV.",
+    )
+    parser.add_argument(
+        "--output-name",
+        type=str,
+        default=None,
+        help="Output filename for the summary CSV inside --summary-dir (defaults to <data_dir_name>.csv).",
+    )
+    parser.add_argument(
+        "--summary-name",
+        type=str,
+        default=None,
+        help="Alias for --output-name.",
     )
     parser.add_argument(
         "--manifest-dir",
@@ -56,18 +80,19 @@ def build_parser():
     parser.add_argument(
         "--tail-trim-percentage",
         type=float,
-        default=1.0,
+        default=10.0,
         help="Percentage removed from each power tail in every active region.",
     )
     parser.add_argument(
         "--discard-initial-samples",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help="Also discard the first samples of every active region.",
     )
     parser.add_argument(
         "--initial-trim-percentage",
         type=float,
-        default=1.0,
+        default=10.0,
         help="Initial time-ordered percentage removed when its flag is set.",
     )
     parser.add_argument(
@@ -142,7 +167,7 @@ def process_file(csv_path, metadata, args, write_plot=True):
     frequency = result.summary["sampling_rate_hz"]
 
     if write_plot:
-        dp.plot_measurement(result, args.output_dir / f"{csv_path.stem}.pdf")
+        dp.plot_measurement(result, args.plot_dir / f"{csv_path.stem}.pdf")
 
     power_offsets = regions["power_offset_W"]
     energies = regions["energy_per_inference_J"]
@@ -197,12 +222,35 @@ def main():
     args = build_parser().parse_args()
     manifest_dir = args.manifest_dir or args.data_dir
     args.manifest_dir = manifest_dir
-    args.output_dir.mkdir(parents=True, exist_ok=True)
+
+    plot_dir = (
+        args.plot_dir
+        or args.output_dir
+        or (REPOSITORY_ROOT / "measurements" / "Plot" / args.data_dir.name)
+    )
+    args.plot_dir = plot_dir
+    args.plot_dir.mkdir(parents=True, exist_ok=True)
+
     csv_files = sorted(args.data_dir.rglob("*.csv"))
     if not csv_files:
         raise FileNotFoundError(f"No CSV files found in {args.data_dir}")
 
-    summary_path = args.output_dir / "summary.csv"
+    summary_dir = args.summary_dir
+    summary_dir.mkdir(parents=True, exist_ok=True)
+
+    output_name = (
+        args.output_name or args.summary_name or f"{args.data_dir.name}.csv"
+    )
+    output_name_path = Path(output_name)
+    if output_name_path.is_absolute() or len(output_name_path.parts) > 1:
+        summary_path = output_name_path
+    else:
+        if not output_name.endswith(".csv"):
+            output_name = f"{output_name}.csv"
+        summary_path = summary_dir / output_name
+
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+
     summary_rows = {}
     if summary_path.is_file():
         try:
@@ -220,7 +268,7 @@ def main():
     skipped_files = 0
     existing_plot_skips = 0
     for csv_path in csv_files:
-        plot_path = args.output_dir / f"{csv_path.stem}.pdf"
+        plot_path = args.plot_dir / f"{csv_path.stem}.pdf"
         summary_key = str(csv_path.relative_to(args.data_dir))
         if plot_path.is_file() and summary_key in summary_rows:
             skipped_files += 1
@@ -251,14 +299,13 @@ def main():
     if not new_summary_rows and not summary_rows:
         raise RuntimeError("No CSV file has a matching COMPLETE manifest")
 
-
     pd.DataFrame(summary_rows.values()).to_csv(summary_path, index=False)
     print(f"Processed {len(new_summary_rows)} files")
     print(f"Skipped {existing_plot_skips} files with existing plots")
     print(
         f"Skipped {skipped_files - existing_plot_skips} incomplete or unpaired files"
     )
-    print(f"Summary saved to: {args.output_dir}")
+    print(f"Summary saved to: {summary_path}")
 
 
 if __name__ == "__main__":

@@ -273,15 +273,14 @@ MPLBACKEND=Agg python processing_report/process_and_visualize.py
 To process one measurement with optional trimming, use:
 
 ```bash
-python processing_report/data_processing_discard.py measurements/runs/MEASUREMENT.csv \
-  --tail-trim-percentage 1 \
+python processing_report/data_processing.py measurements/runs/MEASUREMENT.csv \
+  --tail-trim-percentage 10 \
   --discard-initial-samples \
-  --initial-trim-percentage 5
+  --initial-trim-percentage 10
 ```
 
-This removes the lowest 1% and highest 1% power samples in each active region.
-The optional flag also removes the first 5% of samples in time order. Omit the
-flag to keep the first samples.
+By default, data processing discards the lowest 10% and highest 10% power samples
+in each active region, as well as the first 10% of samples in time order.
 Trimming is skipped when a cycle has fewer than 10 inferences.
 
 By default, the script reads `measurements/runs/jetson_nano_base`, finds each
@@ -300,14 +299,16 @@ the processor retains the result and reports a classified-idle fallback.
 ```bash
 python processing_report/process_and_visualize.py \
   --data-dir measurements/runs/BOARD_LABEL \
-  --output-dir measurements/Plot/BOARD_LABEL \
+  --plot-dir measurements/Plot/BOARD_LABEL \
+  --output-name BOARD_LABEL.csv \
   --max-clock-uncertainty-fraction 0.50
 ```
 
-The generated `summary.csv` includes model and campaign identity, quality
-status, achieved sampling rate, inference count, expected and detected active
-regions, classifier source, clock uncertainty/fallback reason, idle-baseline
-source/statistics, threshold, power mean/variance, and energy mean/variance.
+The generated summary CSV (saved in `measurements/summaries/`) includes model
+and campaign identity, quality status, achieved sampling rate, inference count,
+expected and detected active regions, classifier source, clock uncertainty/fallback
+reason, idle-baseline source/statistics, threshold, power mean/variance, and
+energy mean/variance.
 
 ## Energy lookup table
 
@@ -316,7 +317,7 @@ processed board summaries:
 
 ```bash
 python -m processing_report.build_energy_lookup_table \
-  measurements/Plot/pi5/summary.csv \
+  measurements/summaries/pi5.csv \
   --output measurements/Plot/pi5/pi5_energy_lookup.csv
 ```
 
