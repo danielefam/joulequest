@@ -5,8 +5,8 @@ import argparse
 import sys
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 import pandas as pd
+
 
 try:
     from . import data_processing as dp
@@ -127,7 +127,7 @@ def _processing_config(args):
     )
 
 
-def process_file(csv_path, metadata, args, combined_axis, write_plot=True):
+def process_file(csv_path, metadata, args, write_plot=True):
     manifest_path = get_manifest_file_path(
         args.manifest_dir or args.data_dir,
         csv_path,
@@ -140,14 +140,6 @@ def process_file(csv_path, metadata, args, combined_axis, write_plot=True):
     samples = result.samples
     regions = result.regions
     frequency = result.summary["sampling_rate_hz"]
-
-    time_seconds = samples["time_s"]
-    combined_axis.plot(
-        time_seconds,
-        samples["power_smoothed_W"],
-        label=csv_path.stem,
-        linewidth=0.2,
-    )
 
     if write_plot:
         dp.plot_measurement(result, args.output_dir / f"{csv_path.stem}.pdf")
@@ -227,7 +219,6 @@ def main():
     new_summary_rows = []
     skipped_files = 0
     existing_plot_skips = 0
-    combined_figure, combined_axis = plt.subplots(figsize=(15, 7))
     for csv_path in csv_files:
         plot_path = args.output_dir / f"{csv_path.stem}.pdf"
         summary_key = str(csv_path.relative_to(args.data_dir))
@@ -250,7 +241,6 @@ def main():
                 csv_path,
                 metadata,
                 args,
-                combined_axis,
                 write_plot=not plot_path.is_file(),
             )
             summary_rows[summary_row["file"]] = summary_row
@@ -261,17 +251,6 @@ def main():
     if not new_summary_rows and not summary_rows:
         raise RuntimeError("No CSV file has a matching COMPLETE manifest")
 
-    if new_summary_rows:
-        combined_axis.set_title("Smoothed power comparison")
-        combined_axis.set_xlabel("Time (s)")
-        combined_axis.set_ylabel("Power (W)")
-        combined_axis.grid(True, alpha=0.3)
-        combined_axis.legend()
-        combined_figure.tight_layout()
-        combined_figure.savefig(
-            args.output_dir / "smoothed_power_comparison.pdf", format="pdf"
-        )
-    plt.close(combined_figure)
 
     pd.DataFrame(summary_rows.values()).to_csv(summary_path, index=False)
     print(f"Processed {len(new_summary_rows)} files")
