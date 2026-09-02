@@ -273,13 +273,18 @@ def print_resnet18(path, batch=8, label="Nano"):
 
 
 def _default_summary_path(name, legacy_subpath):
+    lookup_summaries_path = (
+        Path("measurements/lookup_summaries/summaries") / f"{name}.csv"
+    )
+    if lookup_summaries_path.is_file():
+        return lookup_summaries_path
     summaries_path = Path("measurements/summaries") / f"{name}.csv"
     if summaries_path.is_file():
         return summaries_path
     legacy_path = Path(f"measurements/Plot/{legacy_subpath}/summary.csv")
     if legacy_path.is_file():
         return legacy_path
-    return summaries_path
+    return lookup_summaries_path
 
 
 def main():

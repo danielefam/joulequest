@@ -3,7 +3,7 @@
 JouleQuest owns the complete measurement-to-lookup pipeline:
 
 1. acquire hardware power samples;
-2. process runs into one summary per hardware/configuration in `measurements/summaries/`;
+2. process runs into one summary per hardware/configuration in `measurements/lookup_summaries/summaries/`;
 3. validate campaign quality and timing consistency; and
 4. aggregate accepted layer measurements into `energy_lookup_table.csv`.
 
@@ -12,8 +12,8 @@ software configuration:
 
 ```bash
 python -m processing_report.build_energy_lookup_table \
-  measurements/summaries/pi5.csv \
-  --output measurements/Plot/pi5/energy_lookup_table.csv
+  measurements/lookup_summaries/summaries/pi5.csv \
+  --output measurements/lookup_summaries/energy_lookup_table.csv
 ```
 
 Never mix boards, runtimes, batches, dtypes, power modes, or acquisition
@@ -29,7 +29,7 @@ command.
 from joulegrad import EnergyEstimator
 
 estimator = EnergyEstimator(
-    "measurements/Plot/pi5/energy_lookup_table.csv",
+    "measurements/lookup_summaries/energy_lookup_table.csv",
     out_of_range="error",
 )
 energy_mj = estimator.linear(130, 162)

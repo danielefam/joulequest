@@ -49,7 +49,7 @@ def build_parser():
     parser.add_argument(
         "--summary-dir",
         type=Path,
-        default=REPOSITORY_ROOT / "measurements" / "summaries",
+        default=REPOSITORY_ROOT / "measurements" / "lookup_summaries" / "summaries",
         help="Directory receiving the summary CSV.",
     )
     parser.add_argument(

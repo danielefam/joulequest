@@ -422,7 +422,10 @@ class TailTrimProcessingTests(unittest.TestCase):
         )
         self.assertEqual(
             args.summary_dir,
-            process_and_visualize.REPOSITORY_ROOT / "measurements" / "summaries",
+            process_and_visualize.REPOSITORY_ROOT
+            / "measurements"
+            / "lookup_summaries"
+            / "summaries",
         )
         self.assertEqual(args.output_name, "pi5_custom.csv")
         self.assertIsNone(args.plot_dir)

@@ -304,7 +304,7 @@ python processing_report/process_and_visualize.py \
   --max-clock-uncertainty-fraction 0.50
 ```
 
-The generated summary CSV (saved in `measurements/summaries/`) includes model
+The generated summary CSV (saved in `measurements/lookup_summaries/summaries/`) includes model
 and campaign identity, quality status, achieved sampling rate, inference count,
 expected and detected active regions, classifier source, clock uncertainty/fallback
 reason, idle-baseline source/statistics, threshold, power mean/variance, and
@@ -317,8 +317,8 @@ processed board summaries:
 
 ```bash
 python -m processing_report.build_energy_lookup_table \
-  measurements/summaries/pi5.csv \
-  --output measurements/Plot/pi5/pi5_energy_lookup.csv
+  measurements/lookup_summaries/summaries/pi5.csv \
+  --output measurements/lookup_summaries/pi5_energy_lookup.csv
 ```
 
 The output has one row per measured layer configuration. Linear rows use
