@@ -1,6 +1,4 @@
 """Process INA226 CSV measurements and visualize the resulting traces."""
-# The following script was generated entirely by GPT-5.6 
-# and is intended solely for presentation purposes.
 import argparse
 import sys
 from pathlib import Path
