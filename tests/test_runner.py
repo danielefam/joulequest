@@ -131,6 +131,12 @@ class TorchRunnerLegacyCompatibilityTests(unittest.TestCase):
                 (1, 10),
             ),
             (
+                "PrunedResNet18_32_10.pt",
+                {"type": "prunedresnet18", "image_size": 32, "num_classes": 10},
+                (1, 3, 32, 32),
+                (1, 10),
+            ),
+            (
                 "ResNet50_32_10.pt",
                 {"type": "resnet50", "image_size": 32, "num_classes": 10},
                 (1, 3, 32, 32),

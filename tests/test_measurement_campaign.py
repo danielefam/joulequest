@@ -102,3 +102,38 @@ def test_default_linear_conv_campaign_preserves_original_and_adds_pruning_points
     assert len(expected_conv) - len(original_conv) == 144
     assert linear_points == expected_linear
     assert conv_points == expected_conv
+
+
+def test_pruned_validation_suite_schedules_dense_and_pruned_models(tmp_path):
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "CONNECTION_CONFIG": str(PROJECT_ROOT / "measurement_hosts.example.json"),
+            "OUTPUT_ROOT": str(tmp_path),
+        }
+    )
+    result = subprocess.run(
+        [
+            "bash",
+            str(PROJECT_ROOT / "run_measurement_campaign.sh"),
+            "--board",
+            "dryrun",
+            "--suite",
+            "pruned_validation",
+            "--dry-run",
+        ],
+        cwd=PROJECT_ROOT,
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    model_paths = [
+        match.group(1)
+        for line in result.stdout.splitlines()
+        if (match := re.match(r"^\[\d+/\d+\] (\S+)$", line))
+    ]
+    assert "2 PrunedValidation, 2 total" in result.stdout
+    assert len(model_paths) == 2
+    assert model_paths[0].endswith("ResNet18_32_10.pt")
+    assert model_paths[1].endswith("PrunedResNet18_32_10.pt")
