@@ -314,6 +314,19 @@ manifest_exists_for_model() {
     local model_path="$1"
     local batch_size="$2"
     "$PYTHON_BIN" - "$OUTPUT_DIRECTORY" "$model_path" "$batch_size" <<'PY'
+declare -A COMPLETED_MANIFESTS=()
+MANIFEST_CACHE_LOADED=0
+
+load_completed_manifests() {
+    COMPLETED_MANIFESTS=()
+    MANIFEST_CACHE_LOADED=1
+    [[ -d "$OUTPUT_DIRECTORY" ]] || return 0
+    local completed_model completed_batch
+    while IFS=$'\t' read -r completed_model completed_batch; do
+        [[ -n "$completed_model" ]] || continue
+        COMPLETED_MANIFESTS["${completed_model}|${completed_batch}"]=1
+    done < <(
+        "$PYTHON_BIN" - "$OUTPUT_DIRECTORY" <<'PY'
 import json
 import re
 import sys
@@ -335,6 +348,9 @@ if legacy_conv_match:
             )
         )
     )
+if not output_directory.is_dir():
+    sys.exit(0)
+
 for manifest_path in output_directory.glob("*.json"):
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -347,8 +363,39 @@ for manifest_path in output_directory.glob("*.json"):
     ):
         raise SystemExit(0)
 raise SystemExit(1)
+    if manifest.get("status") != "COMPLETE":
+        continue
+    raw_path = manifest.get("model_path")
+    if not raw_path:
+        continue
+    batch_size = int(manifest.get("input_batch_size", 1))
+    print(f"{raw_path}\t{batch_size}")
+    model_name = Path(raw_path).name
+    legacy_conv_match = re.fullmatch(
+        r"(Conv_\d+_\d+_\d+_\d+)_1(\.[^.]+)", model_name
+    )
+    if legacy_conv_match:
+        norm_name = f"{legacy_conv_match.group(1)}{legacy_conv_match.group(2)}"
+        print(f"{Path(raw_path).with_name(norm_name)}\t{batch_size}")
+    legacy_conv_without = re.fullmatch(
+        r"(Conv_\d+_\d+_\d+_\d+)(\.[^.]+)", model_name
+    )
+    if legacy_conv_without:
+        alt_name = f"{legacy_conv_without.group(1)}_1{legacy_conv_without.group(2)}"
+        print(f"{Path(raw_path).with_name(alt_name)}\t{batch_size}")
 PY
+    )
 }
+
+manifest_exists_for_model() {
+    local model_path="$1"
+    local batch_size="$2"
+    if ((MANIFEST_CACHE_LOADED == 0)); then
+        load_completed_manifests
+    fi
+    [[ -n "${COMPLETED_MANIFESTS["${model_path}|${batch_size}"]+exists}" ]]
+}
+
 
 BOARD_LABEL=""
 SUITE="all"
@@ -725,6 +772,7 @@ run_experiment() {
     if ((exit_code == 0)); then
         completed=$((completed + 1))
         consecutive_failures=0
+        COMPLETED_MANIFESTS["${model_path}|${batch_size}"]=1
         printf '%s\t%s\tCOMPLETE\t0\t%s\n' \
             "$timestamp" "$model_path" "$log_path" >>"$SUMMARY_PATH"
         return 0

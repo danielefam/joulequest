@@ -137,3 +137,59 @@ def test_pruned_validation_suite_schedules_dense_and_pruned_models(tmp_path):
     assert len(model_paths) == 2
     assert model_paths[0].endswith("ResNet18_32_10.pt")
     assert model_paths[1].endswith("PrunedResNet18_32_10.pt")
+
+
+def test_skips_already_completed_manifests(tmp_path):
+    import json
+
+    board_dir = tmp_path / "testboard"
+    board_dir.mkdir(parents=True)
+    manifest_payload = {
+        "status": "COMPLETE",
+        "model_path": "Models/CUDA/ResNet18/ResNet18_32_10.pt",
+        "input_batch_size": 1,
+    }
+    (board_dir / "test_manifest.json").write_text(
+        json.dumps(manifest_payload),
+        encoding="utf-8",
+    )
+
+    fake_py = tmp_path / "fake_automated_measurement.py"
+    fake_py.write_text(
+        "#!/usr/bin/env python3\nimport sys\nprint('Fake measurement called for:', sys.argv)\nsys.exit(0)\n"
+    )
+    fake_py.chmod(0o755)
+
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "CONNECTION_CONFIG": str(PROJECT_ROOT / "measurement_hosts.example.json"),
+            "OUTPUT_ROOT": str(tmp_path),
+        }
+    )
+    # We create a wrapper script or symlink automated_measurement.py in PROJECT_ROOT... wait, automated_measurement.py is invoked beside run_measurement_campaign.sh.
+    # Instead, we can pass --continue-on-error and test with dry-run? Wait, dry-run prints commands without checking manifests.
+    # But we can test manifest_exists_for_model directly by sourcing run_measurement_campaign.sh or running bash snippet!
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"""
+            OUTPUT_DIRECTORY="{board_dir}"
+            PYTHON_BIN="python"
+            eval "$(sed -n '/^declare -A COMPLETED_MANIFESTS/,/^BOARD_LABEL=/p' "{PROJECT_ROOT}/run_measurement_campaign.sh" | sed 's/BOARD_LABEL=.*//')"
+            manifest_exists_for_model "Models/CUDA/ResNet18/ResNet18_32_10.pt" 1 && echo "MATCH1"
+            manifest_exists_for_model "Models/CUDA/ResNet18/PrunedResNet18_32_10.pt" 1 && echo "MATCH2" || echo "NOMATCH2"
+            COMPLETED_MANIFESTS["Models/CUDA/ResNet18/PrunedResNet18_32_10.pt|1"]=1
+            manifest_exists_for_model "Models/CUDA/ResNet18/PrunedResNet18_32_10.pt" 1 && echo "MATCH2_AFTER"
+            """,
+        ],
+        cwd=PROJECT_ROOT,
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "MATCH1" in result.stdout
+    assert "NOMATCH2" in result.stdout
+    assert "MATCH2_AFTER" in result.stdout
