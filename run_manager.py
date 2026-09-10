@@ -383,12 +383,14 @@ class RunManager:
         wait_for_acquisition=False,
         acquisition_controller=None,
         manifest_directory=None,
+        cpu_threads=None,
         sleep_fn=time.sleep,
         input_fn=input,
         monotonic_fn=time.monotonic,
     ):
         self.runner_cls = runner_cls
         self.model_path = model_path
+        self.cpu_threads = cpu_threads
         self.number_of_cycles = number_of_cycles
         self.sleep_time = sleep_time
         self.backend = backend
@@ -1246,18 +1248,35 @@ class RunManager:
                 ),
                 "input": "fresh_per_burst",
             },
+            "runner_environment": {
+                "cpu_threads": self.cpu_threads,
+                "available_cpu_cores": os.cpu_count(),
+            },
         }
         self.last_manifest = manifest
         runner = None
         acquisition_stopped = False
 
         try:
+            if self.backend == "cpu" and self.cpu_threads is not None:
+                try:
+                    import torch
+                    torch.set_num_threads(self.cpu_threads)
+                except (ImportError, AttributeError):
+                    pass
+
             runner = self.runner_cls(
                 self.model_path,
                 self.backend,
                 batch_size=self.batch_size,
             )
             runner.prepare()
+            if self.backend == "cpu":
+                try:
+                    import torch
+                    manifest["runner_environment"]["torch_num_threads"] = torch.get_num_threads()
+                except (ImportError, AttributeError):
+                    pass
             manifest["input_batch_size"] = self._input_batch_size(runner)
 
             plan = self._prepare_acquisition(runner, campaign_id, manifest)
@@ -1372,6 +1391,7 @@ def build_argument_parser():
     acquisition_group.add_argument("--wait_for_acquisition", action="store_true", help="Pause after READY so manual INA226 acquisition can be started")
     acquisition_group.add_argument("--stdio_acquisition", action="store_true", help="Coordinate acquisition with the SSH client using JSON stdin/stdout")
     parser.add_argument("--manifest_directory", default=None, help="Directory receiving one JSON manifest per campaign")
+    parser.add_argument("--cpu_threads", "--cpu-threads", dest="cpu_threads", type=int, default=None, help="Number of CPU threads to enforce on the runner")
     return parser
 
 
@@ -1426,6 +1446,7 @@ def main():
         wait_for_acquisition=args.wait_for_acquisition,
         acquisition_controller=acquisition_controller,
         manifest_directory=args.manifest_directory,
+        cpu_threads=getattr(args, "cpu_threads", None),
     )
     try:
         manifest = manager.execute()

@@ -416,6 +416,26 @@ class SshExperimentControllerTests(unittest.TestCase):
         self.assertIn("--clock-sync-exchanges 10", command[-1])
         self.assertIn("--max-clock-uncertainty-fraction 0.1", command[-1])
 
+    def test_execute_forwards_cpu_threads_in_command(self):
+        campaign_id = "campaign-threads-1"
+        manifest = {"campaign_id": campaign_id, "status": "COMPLETE"}
+        factory = FakeSshProcessFactory(self._events(campaign_id, manifest))
+        acquisition = Mock()
+        acquisition.describe.return_value = {
+            "csv_path": f"/tmp/{campaign_id}.csv",
+            "sampling_rate_hz": 100.0,
+        }
+        acquisition.start.return_value = {"status": "RUNNING", "sample_count": 1}
+        acquisition.check_health.return_value = None
+        acquisition.stop.return_value = {"status": "COMPLETE", "sample_count": 25}
+        controller = self._controller(acquisition, factory)
+
+        controller.execute(self._args(cpu_threads=4))
+
+        command = factory.process.command
+        self.assertIn("env OMP_NUM_THREADS=4 TORCH_NUM_THREADS=4", command[-1])
+        self.assertIn("--cpu-threads 4", command[-1])
+
     def test_clock_sync_request_is_timestamped_and_echoes_request_id(self):
         factory = FakeSshProcessFactory([])
         monotonic_values = iter([20.002, 20.003])

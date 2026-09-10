@@ -69,6 +69,7 @@ SHUNT_OHMS="${SHUNT_OHMS:-0.012}"
 MAX_EXPECTED_CURRENT_A="${MAX_EXPECTED_CURRENT_A:-5.0}"
 INA226_PORT="${INA226_PORT:-}"
 EXPERIMENT_COOLDOWN_SECONDS="${EXPERIMENT_COOLDOWN_SECONDS:-10}"
+CPU_THREADS="${CPU_THREADS:-}"
 
 LINEAR_SIZES="${LINEAR_SIZES:-64 128 256 512 1024 2048 4096 8192}"
 
@@ -264,7 +265,7 @@ Examples:
   ./run_measurement_campaign.sh --board pi5 --suite linear --dry-run
 
 Override parameters without editing the script:
-    BACKEND=cpu LINEAR_CONV_BATCH_SIZE=16 NETWORK_BATCH_SIZE=8 \
+    BACKEND=cpu CPU_THREADS=4 LINEAR_CONV_BATCH_SIZE=16 NETWORK_BATCH_SIZE=8 \
     MAX_EXPECTED_CURRENT_A=3.0 \
     ./run_measurement_campaign.sh --board pi5 --suite all
 EOF
@@ -619,6 +620,10 @@ if [[ -n "$VALIDATION_COOLDOWN_SECONDS" ]]; then
 fi
 if [[ -n "$INA226_PORT" ]]; then
     COMMON_ARGS+=(--port "$INA226_PORT")
+fi
+if [[ -n "$CPU_THREADS" ]]; then
+    [[ "$CPU_THREADS" =~ ^[1-9][0-9]*$ ]] || die "CPU_THREADS must be a positive integer: $CPU_THREADS"
+    COMMON_ARGS+=(--cpu-threads "$CPU_THREADS")
 fi
 
 linear_total=0

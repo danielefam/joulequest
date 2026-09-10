@@ -519,11 +519,21 @@ class SshExperimentController:
                     str(args.validation_cooldown_seconds),
                 ]
             )
+        if getattr(args, "cpu_threads", None) is not None:
+            arguments.extend(["--cpu-threads", str(args.cpu_threads)])
         return arguments
 
     def build_command(self, args):
+        python_tokens = shlex.split(self.remote_python)
+        if getattr(args, "cpu_threads", None) is not None:
+            python_tokens = [
+                "env",
+                f"OMP_NUM_THREADS={args.cpu_threads}",
+                f"TORCH_NUM_THREADS={args.cpu_threads}",
+                *python_tokens,
+            ]
         remote_tokens = [
-            *shlex.split(self.remote_python),
+            *python_tokens,
             *self._remote_arguments(args),
         ]
         remote_command = (
@@ -982,6 +992,7 @@ def build_argument_parser():
     parser.add_argument("--acquisition-stop-timeout-s", type=float, default=None)
     parser.add_argument("--number_of_cycles", type=int, default=100)
     parser.add_argument("--sleep_time", type=float, default=3.0)
+    parser.add_argument("--cpu-threads", type=int, default=None, help="Number of CPU threads to enforce on the runner")
     parser.add_argument("--inferences_per_cycle", type=int, default=None)
     parser.add_argument("--target_burst_seconds", type=float, default=0.0)
     parser.add_argument("--sampling_rate_hz", type=float, default=100.0)

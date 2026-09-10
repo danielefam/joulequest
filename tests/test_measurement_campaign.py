@@ -278,3 +278,31 @@ def test_validate_pruned_measurements_tool():
     assert orin_data["measurements"]["dense_found"] is True
     assert orin_data["measurements"]["pruned_found"] is True
     assert orin_data["comparison"]["has_measurements"] is True
+
+
+def test_campaign_forwards_cpu_threads_in_dry_run(tmp_path):
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "CONNECTION_CONFIG": str(PROJECT_ROOT / "measurement_hosts.example.json"),
+            "OUTPUT_ROOT": str(tmp_path),
+            "CPU_THREADS": "4",
+        }
+    )
+    result = subprocess.run(
+        [
+            "bash",
+            str(PROJECT_ROOT / "run_measurement_campaign.sh"),
+            "--board",
+            "pi5_dryrun",
+            "--suite",
+            "pruned_validation_pi5",
+            "--dry-run",
+        ],
+        cwd=PROJECT_ROOT,
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "--cpu-threads 4" in result.stdout

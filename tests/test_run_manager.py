@@ -553,6 +553,7 @@ class RunManagerTests(unittest.TestCase):
                 manifest["workload_policy"]["input"],
                 "fresh_per_burst",
             )
+            self.assertIn("runner_environment", manifest)
             self.assertEqual(
                 manifest["measurement"]["total_executed_inferences"], 240
             )
@@ -570,6 +571,12 @@ class RunManagerTests(unittest.TestCase):
             self.assertTrue(manifest_path.exists())
             persisted = json.loads(manifest_path.read_text(encoding="utf-8"))
             self.assertEqual(persisted["campaign_id"], manifest["campaign_id"])
+
+    def test_cpu_threads_recorded_in_manifest(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manifest = self._manager(temp_dir, cpu_threads=4).execute()
+            self.assertEqual(manifest["runner_environment"]["cpu_threads"], 4)
+            self.assertIn("available_cpu_cores", manifest["runner_environment"])
 
     def test_batch_size_is_passed_to_runner_and_recorded_in_campaign_id(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -628,6 +628,17 @@ if _torch_available:
 
             self.model.eval()
             print(f"Torch model prepared from specification: {self.model_path}")
+            if self.device.type == "cpu":
+                if "TORCH_NUM_THREADS" in os.environ:
+                    try:
+                        torch.set_num_threads(int(os.environ["TORCH_NUM_THREADS"]))
+                    except ValueError:
+                        pass
+                print(
+                    f"Torch CPU threads: {torch.get_num_threads()} (max available cores: {os.cpu_count()})"
+                )
+            else:
+                print(f"Torch device: {self.device}")
 
         def randomize_parameters(self):
             self.model.apply(
