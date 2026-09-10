@@ -14,5 +14,8 @@ docs_new/*
 !docs_new/run_manager_update.md
 !docs_new/experiment_campaign.md
 !docs_new/joulegrad_energy_estimation.md
+!docs_new/energy_lookup_table_measurement_audit.md
+!docs_new/terminal_acquisition_full_report.md
 measurement_hosts.local.json
 *.ipynb
+processing_report/validate_pruned_measurements.py
