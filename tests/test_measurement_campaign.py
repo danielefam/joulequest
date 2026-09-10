@@ -1,6 +1,7 @@
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 
@@ -104,7 +105,7 @@ def test_default_linear_conv_campaign_preserves_original_and_adds_pruning_points
     assert conv_points == expected_conv
 
 
-def test_pruned_validation_suite_schedules_dense_and_pruned_models(tmp_path):
+def test_pruned_validation_orin_suite_schedules_dense_and_orin_pruned_models(tmp_path):
     environment = os.environ.copy()
     environment.update(
         {
@@ -117,9 +118,9 @@ def test_pruned_validation_suite_schedules_dense_and_pruned_models(tmp_path):
             "bash",
             str(PROJECT_ROOT / "run_measurement_campaign.sh"),
             "--board",
-            "dryrun",
+            "agx_orin",
             "--suite",
-            "pruned_validation",
+            "pruned_validation_orin",
             "--dry-run",
         ],
         cwd=PROJECT_ROOT,
@@ -133,10 +134,47 @@ def test_pruned_validation_suite_schedules_dense_and_pruned_models(tmp_path):
         for line in result.stdout.splitlines()
         if (match := re.match(r"^\[\d+/\d+\] (\S+)$", line))
     ]
-    assert "2 PrunedValidation, 2 total" in result.stdout
+    assert "2 PrunedOrin, 0 PrunedPi5, 2 total" in result.stdout
     assert len(model_paths) == 2
     assert model_paths[0].endswith("ResNet18_32_10.pt")
-    assert model_paths[1].endswith("PrunedResNet18_32_10.pt")
+    assert model_paths[1].endswith("PrunedOrinResNet18_32_10.pt")
+
+
+def test_pruned_validation_pi5_suite_schedules_dense_and_pi5_pruned_models(tmp_path):
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "CONNECTION_CONFIG": str(PROJECT_ROOT / "measurement_hosts.example.json"),
+            "OUTPUT_ROOT": str(tmp_path),
+            "BACKEND": "cpu",
+            "MODEL_ROOT": "Models/CPU",
+        }
+    )
+    result = subprocess.run(
+        [
+            "bash",
+            str(PROJECT_ROOT / "run_measurement_campaign.sh"),
+            "--board",
+            "pi5",
+            "--suite",
+            "pruned_validation_pi5",
+            "--dry-run",
+        ],
+        cwd=PROJECT_ROOT,
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    model_paths = [
+        match.group(1)
+        for line in result.stdout.splitlines()
+        if (match := re.match(r"^\[\d+/\d+\] (\S+)$", line))
+    ]
+    assert "0 PrunedOrin, 2 PrunedPi5, 2 total" in result.stdout
+    assert len(model_paths) == 2
+    assert model_paths[0] == "Models/CPU/ResNet18/ResNet18_32_10.pt"
+    assert model_paths[1] == "Models/CPU/ResNet18/PrunedPi5ResNet18_32_10.pt"
 
 
 def test_skips_already_completed_manifests(tmp_path):
@@ -193,3 +231,50 @@ def test_skips_already_completed_manifests(tmp_path):
     assert "MATCH1" in result.stdout
     assert "NOMATCH2" in result.stdout
     assert "MATCH2_AFTER" in result.stdout
+
+
+def test_validate_pruned_measurements_tool():
+    import json
+
+    result_pi5 = subprocess.run(
+        [
+            sys.executable,
+            str(PROJECT_ROOT / "validate_pruned_measurements.py"),
+            "--board",
+            "pi5",
+            "--json",
+            "--predictions-only",
+        ],
+        cwd=PROJECT_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    pi5_data = json.loads(result_pi5.stdout)
+    assert pi5_data["board"] == "pi5"
+    assert round(pi5_data["predictions"]["pred_dense_energy_mJ"], 2) == 35.15
+    assert round(pi5_data["predictions"]["pred_pruned_energy_mJ"], 2) == 7.92
+    assert round(pi5_data["predictions"]["pred_savings_percent"], 1) == 77.5
+
+    result_orin = subprocess.run(
+        [
+            sys.executable,
+            str(PROJECT_ROOT / "validate_pruned_measurements.py"),
+            "--board",
+            "agx_orin",
+            "--json",
+            "--batch-size",
+            "1",
+        ],
+        cwd=PROJECT_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    orin_data = json.loads(result_orin.stdout)
+    assert orin_data["board"] == "agx_orin"
+    assert round(orin_data["predictions"]["pred_dense_energy_mJ"], 2) == 18.57
+    assert round(orin_data["predictions"]["pred_pruned_energy_mJ"], 2) == 10.82
+    assert orin_data["measurements"]["dense_found"] is True
+    assert orin_data["measurements"]["pruned_found"] is True
+    assert orin_data["comparison"]["has_measurements"] is True

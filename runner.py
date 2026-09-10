@@ -90,6 +90,8 @@ if _torch_available:
     nn = torch.nn
     from layers.attention import RotarySelfAttention, SelfAttention
     from layers.resnet import (
+        PrunedOrinResNet18,
+        PrunedPi5ResNet18,
         PrunedResNet18,
         ResNet18,
         ResNet50,
@@ -219,6 +221,40 @@ if _torch_available:
             )
         return {
             "type": "prunedresnet18",
+            "image_size": params[0],
+            "num_classes": params[1] if len(params) == 2 else 10,
+        }
+
+    def _parse_pruned_orin_resnet18(params, filename):
+        _require_parameter_count(
+            filename,
+            params,
+            {1, 2},
+            f"{filename}_<image_size>[_<num_classes>]",
+        )
+        if params[0] <= 0 or (len(params) == 2 and params[1] <= 0):
+            raise ValueError(
+                f"{filename} image_size and num_classes must be positive"
+            )
+        return {
+            "type": "prunedorinresnet18",
+            "image_size": params[0],
+            "num_classes": params[1] if len(params) == 2 else 10,
+        }
+
+    def _parse_pruned_pi5_resnet18(params, filename):
+        _require_parameter_count(
+            filename,
+            params,
+            {1, 2},
+            f"{filename}_<image_size>[_<num_classes>]",
+        )
+        if params[0] <= 0 or (len(params) == 2 and params[1] <= 0):
+            raise ValueError(
+                f"{filename} image_size and num_classes must be positive"
+            )
+        return {
+            "type": "prunedpi5resnet18",
             "image_size": params[0],
             "num_classes": params[1] if len(params) == 2 else 10,
         }
@@ -430,6 +466,38 @@ if _torch_available:
         "prunedresnet18": TorchLayerDefinition(
             parse=_parse_pruned_resnet18,
             build=lambda params: PrunedResNet18(
+                num_classes=params["num_classes"],
+                cifar_stem=(params["image_size"] <= 32),
+            ),
+            input_shape=lambda params: (1, 3, params["image_size"], params["image_size"]),
+        ),
+        "prunedorinresnet18": TorchLayerDefinition(
+            parse=_parse_pruned_orin_resnet18,
+            build=lambda params: PrunedOrinResNet18(
+                num_classes=params["num_classes"],
+                cifar_stem=(params["image_size"] <= 32),
+            ),
+            input_shape=lambda params: (1, 3, params["image_size"], params["image_size"]),
+        ),
+        "prunedresnet18orin": TorchLayerDefinition(
+            parse=_parse_pruned_orin_resnet18,
+            build=lambda params: PrunedOrinResNet18(
+                num_classes=params["num_classes"],
+                cifar_stem=(params["image_size"] <= 32),
+            ),
+            input_shape=lambda params: (1, 3, params["image_size"], params["image_size"]),
+        ),
+        "prunedpi5resnet18": TorchLayerDefinition(
+            parse=_parse_pruned_pi5_resnet18,
+            build=lambda params: PrunedPi5ResNet18(
+                num_classes=params["num_classes"],
+                cifar_stem=(params["image_size"] <= 32),
+            ),
+            input_shape=lambda params: (1, 3, params["image_size"], params["image_size"]),
+        ),
+        "prunedresnet18pi5": TorchLayerDefinition(
+            parse=_parse_pruned_pi5_resnet18,
+            build=lambda params: PrunedPi5ResNet18(
                 num_classes=params["num_classes"],
                 cifar_stem=(params["image_size"] <= 32),
             ),

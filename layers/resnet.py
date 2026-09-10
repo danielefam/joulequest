@@ -122,7 +122,7 @@ class ResNet18(nn.Module):
         return self.classifier(torch.flatten(outputs, 1))
 
 
-DEFAULT_PRUNED_CONFIG = {
+DEFAULT_PRUNED_CONFIG_ORIN = {
     "stem_out": 64,
     "blocks": [
         # stage 1 (layer1.0, layer1.1)
@@ -140,6 +140,27 @@ DEFAULT_PRUNED_CONFIG = {
     ],
     "classifier_in": 297,
 }
+
+DEFAULT_PRUNED_CONFIG_PI5 = {
+    "stem_out": 64,
+    "blocks": [
+        # stage 1 (layer1.0, layer1.1)
+        {"in_channels": 64, "mid_channels": 64, "out_channels": 64, "stride": 1},
+        {"in_channels": 64, "mid_channels": 64, "out_channels": 64, "stride": 1},
+        # stage 2 (layer2.0, layer2.1)
+        {"in_channels": 64, "mid_channels": 127, "out_channels": 128, "stride": 2},
+        {"in_channels": 128, "mid_channels": 127, "out_channels": 128, "stride": 1},
+        # stage 3 (layer3.0, layer3.1)
+        {"in_channels": 128, "mid_channels": 248, "out_channels": 231, "stride": 2},
+        {"in_channels": 231, "mid_channels": 139, "out_channels": 238, "stride": 1},
+        # stage 4 (layer4.0, layer4.1)
+        {"in_channels": 238, "mid_channels": 127, "out_channels": 248, "stride": 2},
+        {"in_channels": 248, "mid_channels": 64, "out_channels": 258, "stride": 1},
+    ],
+    "classifier_in": 258,
+}
+
+DEFAULT_PRUNED_CONFIG = DEFAULT_PRUNED_CONFIG_ORIN
 
 
 class PrunedCifarResNet18(nn.Module):
@@ -255,7 +276,31 @@ class PrunedCifarResNet18(nn.Module):
         return self.classifier(torch.flatten(outputs, 1))
 
 
+class PrunedOrinCifarResNet18(PrunedCifarResNet18):
+    """Pruned CIFAR-10 ResNet-18 optimized for NVIDIA Jetson AGX Orin."""
+
+    def __init__(self, num_classes=10, cifar_stem=True, config=None):
+        super().__init__(
+            num_classes=num_classes,
+            cifar_stem=cifar_stem,
+            config=config or DEFAULT_PRUNED_CONFIG_ORIN,
+        )
+
+
+class PrunedPi5CifarResNet18(PrunedCifarResNet18):
+    """Pruned CIFAR-10 ResNet-18 optimized for Raspberry Pi 5."""
+
+    def __init__(self, num_classes=10, cifar_stem=True, config=None):
+        super().__init__(
+            num_classes=num_classes,
+            cifar_stem=cifar_stem,
+            config=config or DEFAULT_PRUNED_CONFIG_PI5,
+        )
+
+
 PrunedResNet18 = PrunedCifarResNet18
+PrunedOrinResNet18 = PrunedOrinCifarResNet18
+PrunedPi5ResNet18 = PrunedPi5CifarResNet18
 
 
 class ResNet50(nn.Module):

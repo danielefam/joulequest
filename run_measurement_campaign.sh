@@ -32,7 +32,8 @@ RESNET18_MODEL_PATH="${RESNET18_MODEL_PATH:-${RESNET18_MODEL_DIRECTORY}/ResNet18
 RESNET50_MODEL_DIRECTORY="${RESNET50_MODEL_DIRECTORY:-${MODEL_ROOT}/ResNet50}"
 RESNET50_MODEL_PATH="${RESNET50_MODEL_PATH:-${RESNET50_MODEL_DIRECTORY}/ResNet50_${RESNET50_IMAGE_SIZE:-224}_${RESNET50_NUM_CLASSES:-1000}${MODEL_SUFFIX}}"
 CIFAR_DENSE_MODEL_PATH="${CIFAR_DENSE_MODEL_PATH:-${RESNET18_MODEL_DIRECTORY}/ResNet18_32_10${MODEL_SUFFIX}}"
-CIFAR_PRUNED_MODEL_PATH="${CIFAR_PRUNED_MODEL_PATH:-${RESNET18_MODEL_DIRECTORY}/PrunedResNet18_32_10${MODEL_SUFFIX}}"
+CIFAR_PRUNED_ORIN_MODEL_PATH="${CIFAR_PRUNED_ORIN_MODEL_PATH:-${RESNET18_MODEL_DIRECTORY}/PrunedOrinResNet18_32_10${MODEL_SUFFIX}}"
+CIFAR_PRUNED_PI5_MODEL_PATH="${CIFAR_PRUNED_PI5_MODEL_PATH:-${RESNET18_MODEL_DIRECTORY}/PrunedPi5ResNet18_32_10${MODEL_SUFFIX}}"
 
 NUMBER_OF_CYCLES="${NUMBER_OF_CYCLES:-100}"
 # BATCH_SIZE remains a compatibility override when the two suite-specific
@@ -243,8 +244,9 @@ Options:
   --board LABEL       Safe label used only for the local result directory.
     --suite SUITES      Comma-separated suite list: linear, conv, attention,
                         rotaryattention, lenet, resnet18, resnet50,
-                        pruned_validation, or all (default: all). all runs
-                        Linear, Conv, SelfAttention, RotaryAttention, and LeNet.
+                        pruned_validation_orin, pruned_validation_pi5, or all
+                        (default: all). all runs Linear, Conv, SelfAttention,
+                        RotaryAttention, and LeNet.
   --dry-run           Print commands without running measurements.
   --continue-on-error Continue after an experiment exits nonzero.
   --repeat-completed  Rerun experiments with an existing COMPLETE manifest.
@@ -431,11 +433,14 @@ for suite_name in "${REQUESTED_SUITES[@]}"; do
         linear|conv|attention|rotaryattention|lenet|resnet18|resnet50)
             SELECTED_SUITES["$suite_name"]=1
             ;;
-        pruned_validation|resnet18_pruned|pruned)
-            SELECTED_SUITES[pruned_validation]=1
+        pruned_validation_orin|pruned_orin)
+            SELECTED_SUITES[pruned_validation_orin]=1
+            ;;
+        pruned_validation_pi5|pruned_pi5)
+            SELECTED_SUITES[pruned_validation_pi5]=1
             ;;
         *)
-            die "--suite must be a comma-separated list of linear, conv, attention, rotaryattention, lenet, resnet18, resnet50, pruned_validation, or all"
+            die "--suite must be a comma-separated list of linear, conv, attention, rotaryattention, lenet, resnet18, resnet50, pruned_validation_orin, pruned_validation_pi5, or all"
             ;;
     esac
 done
@@ -623,7 +628,8 @@ rotaryattention_total=0
 lenet_total=0
 resnet18_total=0
 resnet50_total=0
-pruned_validation_total=0
+pruned_validation_orin_total=0
+pruned_validation_pi5_total=0
 if suite_is_selected linear; then
     linear_axis_total=$((${#LINEAR_SIZE_LIST[@]} + ${#LINEAR_PRUNING_EXTRA_SIZE_LIST[@]}))
     linear_total=$((linear_axis_total * linear_axis_total))
@@ -649,14 +655,17 @@ fi
 if suite_is_selected resnet50; then
     resnet50_total=$((1 + ${#RESNET50_COMPONENT_MODELS[@]}))
 fi
-if suite_is_selected pruned_validation; then
-    pruned_validation_total=2
+if suite_is_selected pruned_validation_orin; then
+    pruned_validation_orin_total=2
 fi
-total=$((linear_total + conv_total + attention_total + rotaryattention_total + lenet_total + resnet18_total + resnet50_total + pruned_validation_total))
+if suite_is_selected pruned_validation_pi5; then
+    pruned_validation_pi5_total=2
+fi
+total=$((linear_total + conv_total + attention_total + rotaryattention_total + lenet_total + resnet18_total + resnet50_total + pruned_validation_orin_total + pruned_validation_pi5_total))
 
 printf 'Board label: %s\n' "$BOARD_LABEL"
-printf 'Suite: %s (%d Linear, %d Conv, %d SelfAttention, %d RotaryAttention, %d LeNet, %d ResNet-18, %d ResNet-50, %d PrunedValidation, %d total)\n' \
-    "$SUITE" "$linear_total" "$conv_total" "$attention_total" "$rotaryattention_total" "$lenet_total" "$resnet18_total" "$resnet50_total" "$pruned_validation_total" "$total"
+printf 'Suite: %s (%d Linear, %d Conv, %d SelfAttention, %d RotaryAttention, %d LeNet, %d ResNet-18, %d ResNet-50, %d PrunedOrin, %d PrunedPi5, %d total)\n' \
+    "$SUITE" "$linear_total" "$conv_total" "$attention_total" "$rotaryattention_total" "$lenet_total" "$resnet18_total" "$resnet50_total" "$pruned_validation_orin_total" "$pruned_validation_pi5_total" "$total"
 printf 'Batch sizes: Linear/Conv=%s; Attention/RotaryAttention=1; LeNet/ResNet-18=%s; ResNet-50=1\n' \
     "$LINEAR_CONV_BATCH_SIZE" "$NETWORK_BATCH_SIZE"
 printf 'Results: %s\n' "$OUTPUT_DIRECTORY"
@@ -886,9 +895,14 @@ if suite_is_selected resnet50; then
     done
 fi
 
-if suite_is_selected pruned_validation; then
+if suite_is_selected pruned_validation_orin; then
     run_experiment "$CIFAR_DENSE_MODEL_PATH" "$NETWORK_BATCH_SIZE"
-    run_experiment "$CIFAR_PRUNED_MODEL_PATH" "$NETWORK_BATCH_SIZE"
+    run_experiment "$CIFAR_PRUNED_ORIN_MODEL_PATH" "$NETWORK_BATCH_SIZE"
+fi
+
+if suite_is_selected pruned_validation_pi5; then
+    run_experiment "$CIFAR_DENSE_MODEL_PATH" "$NETWORK_BATCH_SIZE"
+    run_experiment "$CIFAR_PRUNED_PI5_MODEL_PATH" "$NETWORK_BATCH_SIZE"
 fi
 
 printf '\nCampaign finished for board %s.\n' "$BOARD_LABEL"

@@ -137,6 +137,18 @@ class TorchRunnerLegacyCompatibilityTests(unittest.TestCase):
                 (1, 10),
             ),
             (
+                "PrunedOrinResNet18_32_10.pt",
+                {"type": "prunedorinresnet18", "image_size": 32, "num_classes": 10},
+                (1, 3, 32, 32),
+                (1, 10),
+            ),
+            (
+                "PrunedPi5ResNet18_32_10.pt",
+                {"type": "prunedpi5resnet18", "image_size": 32, "num_classes": 10},
+                (1, 3, 32, 32),
+                (1, 10),
+            ),
+            (
                 "ResNet50_32_10.pt",
                 {"type": "resnet50", "image_size": 32, "num_classes": 10},
                 (1, 3, 32, 32),
@@ -215,6 +227,8 @@ class TorchRunnerLegacyCompatibilityTests(unittest.TestCase):
             ("rElU_1_8.pt", "relu"),
             ("rOtArYaTtEnTiOn_5_8_2.pt", "rotaryattention"),
             ("rEsNeT18_32_10.pt", "resnet18"),
+            ("pRuNeDoRiNrEsNeT18_32_10.pt", "prunedorinresnet18"),
+            ("pRuNeDpI5rEsNeT18_32_10.pt", "prunedpi5resnet18"),
             ("rEsNeT50_32_10.pt", "resnet50"),
         ]
 
