@@ -18,4 +18,3 @@ docs_new/*
 !docs_new/terminal_acquisition_full_report.md
 measurement_hosts.local.json
 *.ipynb
-processing_report/validate_pruned_measurements.py
