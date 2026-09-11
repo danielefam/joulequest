@@ -318,11 +318,11 @@ COMMON_ARGS=(
     --calibration-duration-tolerance "$CALIBRATION_DURATION_TOLERANCE"
     --max_relative_mad "$MAX_RELATIVE_MAD"
     --burst-duration-margin "$BURST_DURATION_MARGIN"
-    --validation_repetitions "$VALIDATION_REPETITIONS"
-    --validation_max_rounds "$VALIDATION_MAX_ROUNDS"
-    --validation_safety_margin "$VALIDATION_SAFETY_MARGIN"
-    --clock_sync_exchanges "$CLOCK_SYNC_EXCHANGES"
-    --max_clock_uncertainty_fraction "$MAX_CLOCK_UNCERTAINTY_FRACTION"
+    --validation-repetitions "$VALIDATION_REPETITIONS"
+    --validation-max-rounds "$VALIDATION_MAX_ROUNDS"
+    --validation-safety-margin "$VALIDATION_SAFETY_MARGIN"
+    --clock-sync-exchanges "$CLOCK_SYNC_EXCHANGES"
+    --max-clock-uncertainty-fraction "$MAX_CLOCK_UNCERTAINTY_FRACTION"
     --max_calibration_inferences "$MAX_CALIBRATION_INFERENCES"
     --leading_idle_seconds "$LEADING_IDLE_SECONDS"
     --trailing_idle_seconds "$TRAILING_IDLE_SECONDS"
@@ -330,15 +330,16 @@ COMMON_ARGS=(
 )
 
 if [[ -n "$INA226_PORT" ]]; then
-    COMMON_ARGS+=(--ina226-port "$INA226_PORT")
+    COMMON_ARGS+=(--port "$INA226_PORT")
 fi
 if [[ -n "$WARMUP_COOLDOWN_SECONDS" ]]; then
     COMMON_ARGS+=(--warmup_cooldown_seconds "$WARMUP_COOLDOWN_SECONDS")
 fi
 if [[ -n "$VALIDATION_COOLDOWN_SECONDS" ]]; then
-    COMMON_ARGS+=(--validation_cooldown_seconds "$VALIDATION_COOLDOWN_SECONDS")
+    COMMON_ARGS+=(--validation-cooldown-seconds "$VALIDATION_COOLDOWN_SECONDS")
 fi
 if [[ -n "$CPU_THREADS" ]]; then
+    [[ "$CPU_THREADS" =~ ^[1-9][0-9]*$ ]] || die "CPU_THREADS must be a positive integer: $CPU_THREADS"
     COMMON_ARGS+=(--cpu-threads "$CPU_THREADS")
 fi
 
