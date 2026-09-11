@@ -254,7 +254,8 @@ def main():
 
     args = parser.parse_args()
 
-    repo_root = Path(__file__).resolve().parents[1]
+    this_file = Path(__file__).resolve()
+    repo_root = this_file.parents[2] if this_file.parent.name == "processing_report" else this_file.parents[1]
     board_defaults = DEFAULT_DATA_PATHS[args.board]
 
     metrics_csv = Path(args.metrics_csv or (repo_root / board_defaults["metrics_csv"]))

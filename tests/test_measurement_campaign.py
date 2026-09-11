@@ -236,10 +236,16 @@ def test_skips_already_completed_manifests(tmp_path):
 def test_validate_pruned_measurements_tool():
     import json
 
+    validate_script = (
+        PROJECT_ROOT / "processing_report" / "validate_pruned_measurements.py"
+        if (PROJECT_ROOT / "processing_report" / "validate_pruned_measurements.py").is_file()
+        else PROJECT_ROOT / "validate_pruned_measurements.py"
+    )
+
     result_pi5 = subprocess.run(
         [
             sys.executable,
-            str(PROJECT_ROOT / "validate_pruned_measurements.py"),
+            str(validate_script),
             "--board",
             "pi5",
             "--json",
@@ -259,7 +265,7 @@ def test_validate_pruned_measurements_tool():
     result_orin = subprocess.run(
         [
             sys.executable,
-            str(PROJECT_ROOT / "validate_pruned_measurements.py"),
+            str(validate_script),
             "--board",
             "agx_orin",
             "--json",
