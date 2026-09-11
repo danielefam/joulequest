@@ -24,8 +24,8 @@ LINEAR_MODEL_DIRECTORY="${LINEAR_MODEL_DIRECTORY:-${MODEL_ROOT}/Linear}"
 CONV_MODEL_DIRECTORY="${CONV_MODEL_DIRECTORY:-${MODEL_ROOT}/Conv}"
 RESNET18_MODEL_DIRECTORY="${RESNET18_MODEL_DIRECTORY:-${MODEL_ROOT}/ResNet18}"
 
-# Default batch size is 32 to saturate CUDA warps/SMs on AGX Orin.
-BATCH_SIZE="${BATCH_SIZE:-32}"
+# Default batch size is 1 (can be overridden via --batch-size N or BATCH_SIZE=N).
+BATCH_SIZE="${BATCH_SIZE:-1}"
 NUMBER_OF_CYCLES="${NUMBER_OF_CYCLES:-100}"
 SLEEP_TIME="${SLEEP_TIME:-3}"
 TARGET_BURST_SECONDS="${TARGET_BURST_SECONDS:-0}"
@@ -63,11 +63,11 @@ CPU_THREADS="${CPU_THREADS:-}"
 # BasicBlock 3x3 shape-preserving convolutions (stride 1, padding 1)
 CONV_3X3_INPUT_CHANNELS="${CONV_3X3_INPUT_CHANNELS:-1 2 4 8 16 32 64 128 256 512}"
 CONV_3X3_OUTPUT_CHANNELS="${CONV_3X3_OUTPUT_CHANNELS:-1 8 16 32 64 128 256 512}"
-CONV_3X3_IMAGE_SIZES="${CONV_3X3_IMAGE_SIZES:-2 4 8 16 32 64 128}"
+CONV_3X3_IMAGE_SIZES="${CONV_3X3_IMAGE_SIZES:-2 32 64 128}"
 
 # Pointwise 1x1 convolutions (stride 1, padding 0) for channel projection
 CONV_1X1_CHANNELS="${CONV_1X1_CHANNELS:-1 8 64 512}"
-CONV_1X1_IMAGE_SIZES="${CONV_1X1_IMAGE_SIZES:-2 8 16 32 64}"
+CONV_1X1_IMAGE_SIZES="${CONV_1X1_IMAGE_SIZES:-2 8 32 64}"
 
 # Linear classifier layers (up to 512 inputs, including 10 classes)
 LINEAR_INPUT_SIZES="${LINEAR_INPUT_SIZES:-1 8 32 64 128 256 512}"
@@ -111,14 +111,6 @@ STEM_MODELS=(
     "${RESNET18_MODEL_DIRECTORY}/ResNetConv_3_64_224_7_2_3${MODEL_SUFFIX}"
 )
 
-# Full models for baseline calibration and validation
-VALIDATION_MODELS=(
-    "${RESNET18_MODEL_DIRECTORY}/ResNet18_32_10${MODEL_SUFFIX}"
-    "${RESNET18_MODEL_DIRECTORY}/PrunedOrinResNet18_32_10${MODEL_SUFFIX}"
-    "${RESNET18_MODEL_DIRECTORY}/ResNet18_128_10${MODEL_SUFFIX}"
-    "${RESNET18_MODEL_DIRECTORY}/ResNet18_224_10${MODEL_SUFFIX}"
-)
-
 REPEAT_COMPLETED="${REPEAT_COMPLETED:-0}"
 CONTINUE_ON_ERROR="${CONTINUE_ON_ERROR:-0}"
 
@@ -128,8 +120,8 @@ Usage:
   ./run_cifar_imagenette_campaign.sh [options]
 
 Options:
-  --board LABEL                  Safe label for result directory (default: agx_orin_bs32).
-  --batch-size N                 Inference batch size (default: 32).
+  --board LABEL                  Safe label for result directory (default: agx_orin).
+  --batch-size N                 Inference batch size (default: 1).
   --backend BACKEND              Target backend: cuda, cpu, or tpu (default: cuda).
   --dry-run                      Print scheduled commands without executing.
   --continue-on-error            Continue after an experiment exits nonzero.
@@ -138,11 +130,11 @@ Options:
   -h, --help                     Show this message.
 
 Examples:
-  # Standard run with batch size 32 on AGX Orin:
-  ./run_cifar_imagenette_campaign.sh --board agx_orin_bs32
+  # Standard run with default batch size 1 on AGX Orin:
+  ./run_cifar_imagenette_campaign.sh --board agx_orin
 
-  # Test run with batch size 16:
-  ./run_cifar_imagenette_campaign.sh --board agx_orin_bs16 --batch-size 16
+  # Run with batch size 32 to isolate CUDA kernel launch overhead:
+  ./run_cifar_imagenette_campaign.sh --board agx_orin_bs32 --batch-size 32
 
   # Dry-run inspection:
   ./run_cifar_imagenette_campaign.sh --dry-run
@@ -229,7 +221,7 @@ manifest_exists_for_model() {
     [[ -n "${COMPLETED_MANIFESTS["${model_path}|${batch_size}"]+exists}" ]]
 }
 
-BOARD_LABEL="${BOARD_LABEL:-agx_orin_bs32}"
+BOARD_LABEL="${BOARD_LABEL:-agx_orin}"
 DRY_RUN=0
 
 while (($#)); do
@@ -358,9 +350,8 @@ conv_1x1_total=$((${#CONV_1X1_CH_LIST[@]} * ${#CONV_1X1_CH_LIST[@]} * ${#CONV_1X
 stride2_total=$((${#RESNET_STRIDE2_CONV_MODELS[@]} + ${#RESNET_STRIDE2_DOWNSAMPLE_MODELS[@]}))
 stem_total=${#STEM_MODELS[@]}
 linear_total=$((${#LINEAR_IN_LIST[@]} * ${#LINEAR_OUT_LIST[@]}))
-validation_total=${#VALIDATION_MODELS[@]}
 
-total=$((conv_3x3_total + conv_1x1_total + stride2_total + stem_total + linear_total + validation_total))
+total=$((conv_3x3_total + conv_1x1_total + stride2_total + stem_total + linear_total))
 
 printf '==============================================================================\n'
 printf ' JOULEQUEST FOCUSED CAMPAIGN: CIFAR-10 & IMAGENETTE RESNET-18 (BATCH %d)\n' "$BATCH_SIZE"
@@ -368,8 +359,8 @@ printf '========================================================================
 printf 'Board label : %s\n' "$BOARD_LABEL"
 printf 'Backend     : %s\n' "$BACKEND"
 printf 'Batch size  : %d\n' "$BATCH_SIZE"
-printf 'Total models: %d (Conv3x3: %d, Pointwise1x1: %d, Stride2: %d, Stem: %d, Linear: %d, Validation: %d)\n' \
-    "$total" "$conv_3x3_total" "$conv_1x1_total" "$stride2_total" "$stem_total" "$linear_total" "$validation_total"
+printf 'Total models: %d (Conv3x3: %d, Pointwise1x1: %d, Stride2: %d, Stem: %d, Linear: %d)\n' \
+    "$total" "$conv_3x3_total" "$conv_1x1_total" "$stride2_total" "$stem_total" "$linear_total"
 printf 'Results dir : %s\n' "$OUTPUT_DIRECTORY"
 ((DRY_RUN == 0)) || printf 'Mode        : DRY-RUN (no physical measurements will start)\n'
 printf '==============================================================================\n\n'
@@ -527,11 +518,6 @@ for in_features in "${LINEAR_IN_LIST[@]}"; do
             "${LINEAR_MODEL_DIRECTORY}/Linear_${in_features}_${out_features}${MODEL_SUFFIX}" \
             "$BATCH_SIZE"
     done
-done
-
-# 6. End-to-end Models
-for model_path in "${VALIDATION_MODELS[@]}"; do
-    run_experiment "$model_path" "$BATCH_SIZE"
 done
 
 printf '\nCampaign finished for board %s.\n' "$BOARD_LABEL"
