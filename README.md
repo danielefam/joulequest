@@ -116,7 +116,7 @@ Use a model file that exists on your computer. The model name tells the program 
 
 JouleQuest owns measurement processing and lookup-table generation.
 Differentiable Linear, Conv2d, and attention interpolation over the resulting
-CSV is provided by the independent `joulegrad` Python API. See
+CSV is provided by the independent [`joulegrad`](https://github.com/danielefam/joulegrad) Python API (installable via `pip install git+https://github.com/danielefam/joulegrad.git`). See
 [docs_new/joulegrad_energy_estimation.md](docs_new/joulegrad_energy_estimation.md).
 
 ## Configuration

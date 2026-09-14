@@ -21,9 +21,15 @@ policies in one table.
 
 ## Consumer boundary
 
-JouleGrad is an independent API-only package. It consumes the generated CSV;
-it does not import JouleQuest, parse summaries, or provide a lookup-builder
+JouleGrad is an independent API-only package available at [https://github.com/danielefam/joulegrad](https://github.com/danielefam/joulegrad).
+It consumes the generated CSV; it does not import JouleQuest, parse summaries, or provide a lookup-builder
 command.
+
+Install directly from GitHub:
+
+```bash
+pip install git+https://github.com/danielefam/joulegrad.git
+```
 
 ```python
 from joulegrad import EnergyEstimator
