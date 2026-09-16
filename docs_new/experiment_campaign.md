@@ -284,6 +284,7 @@ campaign parameters:
 | `MAX_EXPECTED_CURRENT_A` | `5.0` A | Board/workload current range |
 | `INA226_PORT` | empty | Auto-detect one TI-SCB; set to force a port |
 | `EXPERIMENT_COOLDOWN_SECONDS` | `20` s | Unmeasured board cooling between layer experiments |
+| `MAX_CONV_GFLOPS` | `0` (disabled) | Skip Conv models exceeding this GFLOPs threshold ($2 \cdot B \cdot K^2 \cdot C_{\text{in}} \cdot C_{\text{out}} \cdot S^2 / 10^9$) to prevent power supply trips; logged as `SKIPPED_EXTRAPOLATE` |
 
 The matrix variables are:
 
@@ -352,6 +353,42 @@ This cooldown runs before the next executed experiment. It is not applied to
 models skipped during resume and does not add a delay after the final model.
 It is independent of `SLEEP_TIME`, which separates measured cycles inside one
 experiment.
+
+### Workload filtering for power supply protection (`--max-conv-gflops`)
+
+When measuring on edge boards with strict power supplies or current limits
+(e.g., Jetson AGX Orin with batch size 32), large convolutional layers with high
+spatial resolution and channel counts can draw sudden peak transient current,
+tripping the power supply's overcurrent protection and causing the board to shut
+down.
+
+The `--max-conv-gflops` parameter (or `MAX_CONV_GFLOPS` environment variable)
+sets a workload threshold in GFLOPs:
+
+$$
+\text{FLOPs} = 2 \cdot B \cdot K^2 \cdot C_{\text{in}} \cdot C_{\text{out}} \cdot S^2
+$$
+
+Any convolution exceeding this threshold is safely skipped:
+
+```text
+[312/468] Models/CUDA/Conv/Conv_256_128_3_1_512.pt
+  skipped: model workload exceeds MAX_CONV_GFLOPS (1237 GFLOPs > 700) [extrapolation]
+```
+
+Skipped models are logged in `campaign_summary.tsv` with status
+`SKIPPED_EXTRAPOLATE` so that their energy can be analytically extrapolated
+later without interrupting unattended execution. Both the full campaign
+launcher (`run_measurement_campaign.sh`) and the focused CIFAR/Imagenette
+launcher (`run_cifar_imagenette_campaign.sh`) support this option:
+
+```bash
+# Skip convolutions exceeding 700 GFLOPs:
+./run_measurement_campaign.sh --board agx_orin_bs32 --suite conv --max-conv-gflops 700
+./run_cifar_imagenette_campaign.sh --board agx_orin_bs32 --batch-size 32 --max-conv-gflops 700
+```
+
+By default, `MAX_CONV_GFLOPS=0` (no limit; all models are scheduled).
 
 ## 5. Result organization
 

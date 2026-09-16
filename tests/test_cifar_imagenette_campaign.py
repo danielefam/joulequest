@@ -77,4 +77,44 @@ def test_cifar_imagenette_campaign_custom_batch_size(tmp_path):
 
     assert "JOULEQUEST FOCUSED CAMPAIGN: CIFAR-10 & IMAGENETTE RESNET-18 (BATCH 32)" in result.stdout
     assert "--batch-size 32" in result.stdout
+    # By default, no GFLOPs limit is set (skipped: 0)
+    assert "Scheduled: 468; completed: 0; skipped: 0; failed: 0." in result.stdout
+
+
+def test_cifar_imagenette_campaign_gflops_threshold(tmp_path):
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "CONNECTION_CONFIG": str(PROJECT_ROOT / "measurement_hosts.example.json"),
+            "OUTPUT_ROOT": str(tmp_path),
+        }
+    )
+    result = subprocess.run(
+        [
+            "bash",
+            str(PROJECT_ROOT / "run_cifar_imagenette_campaign.sh"),
+            "--board",
+            "test_orin_bs32",
+            "--batch-size",
+            "32",
+            "--max-conv-gflops",
+            "700",
+            "--dry-run",
+        ],
+        cwd=PROJECT_ROOT,
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert (
+        "Models/CUDA/Conv/Conv_256_128_3_1_512.pt\n  skipped: model workload exceeds MAX_CONV_GFLOPS (1237 GFLOPs > 700) [extrapolation]"
+        in result.stdout
+    )
+    assert (
+        "Models/CUDA/Conv/Conv_256_128_3_1_256.pt\n  python "
+        in result.stdout
+    )
+    assert "Scheduled: 468; completed: 0; skipped: 3; failed: 0." in result.stdout
 

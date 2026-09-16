@@ -312,3 +312,72 @@ def test_campaign_forwards_cpu_threads_in_dry_run(tmp_path):
         text=True,
     )
     assert "--cpu-threads 4" in result.stdout
+
+
+def test_campaign_skips_heavy_conv_models_over_gflops_threshold(tmp_path):
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "CONNECTION_CONFIG": str(PROJECT_ROOT / "measurement_hosts.example.json"),
+            "OUTPUT_ROOT": str(tmp_path),
+            "LINEAR_CONV_BATCH_SIZE": "32",
+        }
+    )
+    result = subprocess.run(
+        [
+            "bash",
+            str(PROJECT_ROOT / "run_measurement_campaign.sh"),
+            "--board",
+            "agx_orin_bs32",
+            "--suite",
+            "conv",
+            "--max-conv-gflops",
+            "700",
+            "--dry-run",
+        ],
+        cwd=PROJECT_ROOT,
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    # Model 256_128_3_1_512 is 1237 GFLOPs at BS=32, so it must be skipped
+    assert (
+        "Models/CUDA/Conv/Conv_256_128_3_1_512.pt\n  skipped: model workload exceeds MAX_CONV_GFLOPS (1237 GFLOPs > 700) [extrapolation]"
+        in result.stdout
+    )
+    # Model 256_128_3_1_256 is 618 GFLOPs at BS=32, so it must be retained
+    assert (
+        "Models/CUDA/Conv/Conv_256_128_3_1_256.pt\n  python "
+        in result.stdout
+    )
+    assert "Scheduled: 1648; completed: 0; skipped: 98; failed: 0." in result.stdout
+
+
+def test_campaign_allows_disabling_gflops_threshold(tmp_path):
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "CONNECTION_CONFIG": str(PROJECT_ROOT / "measurement_hosts.example.json"),
+            "OUTPUT_ROOT": str(tmp_path),
+            "LINEAR_CONV_BATCH_SIZE": "32",
+        }
+    )
+    result = subprocess.run(
+        [
+            "bash",
+            str(PROJECT_ROOT / "run_measurement_campaign.sh"),
+            "--board",
+            "agx_orin_bs32",
+            "--suite",
+            "conv",
+            "--dry-run",
+        ],
+        cwd=PROJECT_ROOT,
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    # By default, MAX_CONV_GFLOPS is 0 (no limit), so 0 models are skipped
+    assert "Scheduled: 1648; completed: 0; skipped: 0; failed: 0." in result.stdout

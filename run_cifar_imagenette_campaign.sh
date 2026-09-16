@@ -56,6 +56,7 @@ MAX_EXPECTED_CURRENT_A="${MAX_EXPECTED_CURRENT_A:-5.0}"
 INA226_PORT="${INA226_PORT:-}"
 EXPERIMENT_COOLDOWN_SECONDS="${EXPERIMENT_COOLDOWN_SECONDS:-10}"
 CPU_THREADS="${CPU_THREADS:-}"
+MAX_CONV_GFLOPS="${MAX_CONV_GFLOPS:-0}"
 
 # ---------------------------------------------------------------------------
 # Targeted Layer Matrices for CIFAR-10 & Imagenette ResNet-18 Pruning
@@ -127,6 +128,8 @@ Options:
   --continue-on-error            Continue after an experiment exits nonzero.
   --repeat-completed             Rerun experiments with an existing COMPLETE manifest.
   --experiment-cooldown-seconds S Inter-experiment cooldown in seconds (default: 10).
+  --max-conv-gflops GFLOPS       Skip Conv models exceeding GFLOPs workload threshold
+                                 (default: 0, no limit).
   -h, --help                     Show this message.
 
 Examples:
@@ -221,6 +224,32 @@ manifest_exists_for_model() {
     [[ -n "${COMPLETED_MANIFESTS["${model_path}|${batch_size}"]+exists}" ]]
 }
 
+CURRENT_MODEL_GFLOPS=0
+
+is_conv_model_too_heavy() {
+    local model_path="$1"
+    local batch_size="$2"
+    local max_gflops="${MAX_CONV_GFLOPS:-0}"
+    ((max_gflops > 0)) || return 1
+    [[ "$batch_size" =~ ^[1-9][0-9]*$ ]] || return 1
+
+    local model_name="${model_path##*/}"
+    local ic s k p oc
+    if [[ "$model_name" =~ ^Conv_([0-9]+)_([0-9]+)_([0-9]+)_([0-9]+)_([0-9]+) ]]; then
+        ic="${BASH_REMATCH[1]}"
+        s="${BASH_REMATCH[2]}"
+        k="${BASH_REMATCH[3]}"
+        p="${BASH_REMATCH[4]}"
+        oc="${BASH_REMATCH[5]}"
+    else
+        return 1
+    fi
+
+    local flops=$(( 2 * batch_size * k * k * ic * oc * s * s ))
+    CURRENT_MODEL_GFLOPS=$(( (flops + 500000000) / 1000000000 ))
+    ((CURRENT_MODEL_GFLOPS > max_gflops))
+}
+
 BOARD_LABEL="${BOARD_LABEL:-agx_orin}"
 DRY_RUN=0
 
@@ -258,6 +287,11 @@ while (($#)); do
             EXPERIMENT_COOLDOWN_SECONDS="$2"
             shift 2
             ;;
+        --max-conv-gflops)
+            (($# >= 2)) || die "--max-conv-gflops requires a value"
+            MAX_CONV_GFLOPS="$2"
+            shift 2
+            ;;
         -h|--help)
             usage
             exit 0
@@ -275,6 +309,8 @@ done
     die "--batch-size must be a positive integer"
 [[ "$BACKEND" == "cpu" || "$BACKEND" == "cuda" || "$BACKEND" == "tpu" ]] ||
     die "BACKEND must be cpu, cuda, or tpu"
+[[ "$MAX_CONV_GFLOPS" =~ ^[0-9]+$ ]] ||
+    die "MAX_CONV_GFLOPS must be a nonnegative integer"
 
 # Auto-adapt model path root if backend is CPU
 if [[ "$BACKEND" == "cpu" && "$MODEL_ROOT" == "Models/CUDA" ]]; then
@@ -361,6 +397,9 @@ printf 'Backend     : %s\n' "$BACKEND"
 printf 'Batch size  : %d\n' "$BATCH_SIZE"
 printf 'Total models: %d (Conv3x3: %d, Pointwise1x1: %d, Stride2: %d, Stem: %d, Linear: %d)\n' \
     "$total" "$conv_3x3_total" "$conv_1x1_total" "$stride2_total" "$stem_total" "$linear_total"
+if ((MAX_CONV_GFLOPS > 0)); then
+    printf 'Max Conv GFLOPs : %d (heavier Conv models will be skipped for extrapolation)\n' "$MAX_CONV_GFLOPS"
+fi
 printf 'Results dir : %s\n' "$OUTPUT_DIRECTORY"
 ((DRY_RUN == 0)) || printf 'Mode        : DRY-RUN (no physical measurements will start)\n'
 printf '==============================================================================\n\n'
@@ -401,6 +440,12 @@ run_experiment() {
     printf '[%d/%d] %s\n' "$attempted" "$total" "$model_path"
 
     if ((DRY_RUN)); then
+        if is_conv_model_too_heavy "$model_path" "$batch_size"; then
+            skipped=$((skipped + 1))
+            printf '  skipped: model workload exceeds MAX_CONV_GFLOPS (%d GFLOPs > %d) [extrapolation]\n' \
+                "$CURRENT_MODEL_GFLOPS" "$MAX_CONV_GFLOPS"
+            return 0
+        fi
         print_command "${command[@]}"
         return 0
     fi
@@ -408,6 +453,16 @@ run_experiment() {
     if ((REPEAT_COMPLETED == 0)) && manifest_exists_for_model "$model_path" "$batch_size"; then
         skipped=$((skipped + 1))
         printf '  skipped: COMPLETE manifest already exists\n'
+        return 0
+    fi
+
+    if is_conv_model_too_heavy "$model_path" "$batch_size"; then
+        skipped=$((skipped + 1))
+        printf '  skipped: model workload exceeds MAX_CONV_GFLOPS (%d GFLOPs > %d) [extrapolation]\n' \
+            "$CURRENT_MODEL_GFLOPS" "$MAX_CONV_GFLOPS"
+        timestamp="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+        printf '%s\t%s\tSKIPPED_EXTRAPOLATE\t0\t-\n' \
+            "$timestamp" "$model_path" >>"$SUMMARY_PATH"
         return 0
     fi
 
