@@ -15,6 +15,14 @@ DEFAULT_DATA_PATHS = {
         "dense_model_names": ["ResNet18_32_10.pt"],
         "pruned_model_names": ["PrunedOrinResNet18_32_10.pt", "PrunedResNet18_32_10.pt"],
     },
+    "agx_orin_bs32": {
+        "pruning_log": "jouleNAS/runs/cifar10/agxorin_bs32/pruning_logs/resnet18_icpr_weight_1p2_lookup_agxorinbs32_energy_lookup_out_of_range_extrapolate_seed_0_energy_mode_discrete_998752_pruning.json",
+        "metrics_csv": "jouleNAS/experiments/csv_files/cifar10/agxorin_bs32/resnet18_icpr_weight_1p2_lookup_agxorinbs32_energy_lookup_out_of_range_extrapolate_seed_0_energy_mode_discrete_998752_metrics.csv",
+        "summary_csv": "joulequest/measurements/lookup_summaries/summaries/agx_orin_bs32.csv",
+        "dense_model_names": ["ResNet18_32_10.pt"],
+        "pruned_model_names": ["PrunedOrinBs32ResNet18_32_10.pt", "PrunedOrinResNet18_32_10.pt"],
+        "batch_size": 32,
+    },
     "pi5": {
         "pruning_log": "jouleNAS/experiments/pruning_logs/resnet18_icpr_weight_0p005_lookup_pi5_energy_lookup_out_of_range_extrapolate_seed_0_energy_mode_discrete_987718_pruning.json",
         "metrics_csv": "jouleNAS/experiments/csv_files/cifar10/pi5/resnet18_icpr_weight_0p005_lookup_pi5_energy_lookup_out_of_range_extrapolate_seed_0_energy_mode_discrete_987718_metrics.csv",
@@ -219,7 +227,7 @@ def main():
     )
     parser.add_argument(
         "--board",
-        choices=["agx_orin", "pi5", "pi5_4threads"],
+        choices=["agx_orin", "agx_orin_bs32", "pi5", "pi5_4threads"],
         default="pi5",
         help="Target hardware board (default: pi5)",
     )
@@ -248,8 +256,8 @@ def main():
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=1,
-        help="Batch size to extract from summary CSV (default: 1)",
+        default=None,
+        help="Batch size to extract from summary CSV (default: from board config)",
     )
 
     args = parser.parse_args()
@@ -258,6 +266,7 @@ def main():
     repo_root = this_file.parents[2] if this_file.parent.name == "processing_report" else this_file.parents[1]
     board_defaults = DEFAULT_DATA_PATHS[args.board]
 
+    target_batch_size = args.batch_size if args.batch_size is not None else board_defaults.get("batch_size", 1)
     metrics_csv = Path(args.metrics_csv or (repo_root / board_defaults["metrics_csv"]))
     summary_csv = Path(args.summary_csv or (repo_root / board_defaults["summary_csv"]))
 
@@ -273,7 +282,7 @@ def main():
             summary_csv,
             board_defaults["dense_model_names"],
             board_defaults["pruned_model_names"],
-            batch_size=args.batch_size,
+            batch_size=target_batch_size,
         )
 
     comparison = compare_predictions_and_measurements(predictions, measurements)

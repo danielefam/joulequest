@@ -90,6 +90,7 @@ if _torch_available:
     nn = torch.nn
     from layers.attention import RotarySelfAttention, SelfAttention
     from layers.resnet import (
+        PrunedOrinBs32ResNet18,
         PrunedOrinResNet18,
         PrunedPi5ResNet18,
         PrunedResNet18,
@@ -238,6 +239,23 @@ if _torch_available:
             )
         return {
             "type": "prunedorinresnet18",
+            "image_size": params[0],
+            "num_classes": params[1] if len(params) == 2 else 10,
+        }
+
+    def _parse_pruned_orin_bs32_resnet18(params, filename):
+        _require_parameter_count(
+            filename,
+            params,
+            {1, 2},
+            f"{filename}_<image_size>[_<num_classes>]",
+        )
+        if params[0] <= 0 or (len(params) == 2 and params[1] <= 0):
+            raise ValueError(
+                f"{filename} image_size and num_classes must be positive"
+            )
+        return {
+            "type": "prunedorinbs32resnet18",
             "image_size": params[0],
             "num_classes": params[1] if len(params) == 2 else 10,
         }
@@ -482,6 +500,22 @@ if _torch_available:
         "prunedresnet18orin": TorchLayerDefinition(
             parse=_parse_pruned_orin_resnet18,
             build=lambda params: PrunedOrinResNet18(
+                num_classes=params["num_classes"],
+                cifar_stem=(params["image_size"] <= 32),
+            ),
+            input_shape=lambda params: (1, 3, params["image_size"], params["image_size"]),
+        ),
+        "prunedorinbs32resnet18": TorchLayerDefinition(
+            parse=_parse_pruned_orin_bs32_resnet18,
+            build=lambda params: PrunedOrinBs32ResNet18(
+                num_classes=params["num_classes"],
+                cifar_stem=(params["image_size"] <= 32),
+            ),
+            input_shape=lambda params: (1, 3, params["image_size"], params["image_size"]),
+        ),
+        "prunedresnet18orinbs32": TorchLayerDefinition(
+            parse=_parse_pruned_orin_bs32_resnet18,
+            build=lambda params: PrunedOrinBs32ResNet18(
                 num_classes=params["num_classes"],
                 cifar_stem=(params["image_size"] <= 32),
             ),

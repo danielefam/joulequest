@@ -298,8 +298,24 @@ class PrunedPi5CifarResNet18(PrunedCifarResNet18):
         )
 
 
+# Default configuration for AGX Orin at Batch Size 32
+DEFAULT_PRUNED_CONFIG_ORIN_BS32 = DEFAULT_PRUNED_CONFIG_ORIN.copy()
+
+
+class PrunedOrinBs32CifarResNet18(PrunedCifarResNet18):
+    """Pruned CIFAR-10 ResNet-18 optimized for NVIDIA Jetson AGX Orin at Batch Size 32."""
+
+    def __init__(self, num_classes=10, cifar_stem=True, config=None):
+        super().__init__(
+            num_classes=num_classes,
+            cifar_stem=cifar_stem,
+            config=config or DEFAULT_PRUNED_CONFIG_ORIN_BS32,
+        )
+
+
 PrunedResNet18 = PrunedCifarResNet18
 PrunedOrinResNet18 = PrunedOrinCifarResNet18
+PrunedOrinBs32ResNet18 = PrunedOrinBs32CifarResNet18
 PrunedPi5ResNet18 = PrunedPi5CifarResNet18
 
 

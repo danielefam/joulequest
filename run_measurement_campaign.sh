@@ -33,6 +33,7 @@ RESNET50_MODEL_DIRECTORY="${RESNET50_MODEL_DIRECTORY:-${MODEL_ROOT}/ResNet50}"
 RESNET50_MODEL_PATH="${RESNET50_MODEL_PATH:-${RESNET50_MODEL_DIRECTORY}/ResNet50_${RESNET50_IMAGE_SIZE:-224}_${RESNET50_NUM_CLASSES:-1000}${MODEL_SUFFIX}}"
 CIFAR_DENSE_MODEL_PATH="${CIFAR_DENSE_MODEL_PATH:-${RESNET18_MODEL_DIRECTORY}/ResNet18_32_10${MODEL_SUFFIX}}"
 CIFAR_PRUNED_ORIN_MODEL_PATH="${CIFAR_PRUNED_ORIN_MODEL_PATH:-${RESNET18_MODEL_DIRECTORY}/PrunedOrinResNet18_32_10${MODEL_SUFFIX}}"
+CIFAR_PRUNED_ORIN_BS32_MODEL_PATH="${CIFAR_PRUNED_ORIN_BS32_MODEL_PATH:-${RESNET18_MODEL_DIRECTORY}/PrunedOrinBs32ResNet18_32_10${MODEL_SUFFIX}}"
 CIFAR_PRUNED_PI5_MODEL_PATH="${CIFAR_PRUNED_PI5_MODEL_PATH:-${RESNET18_MODEL_DIRECTORY}/PrunedPi5ResNet18_32_10${MODEL_SUFFIX}}"
 
 NUMBER_OF_CYCLES="${NUMBER_OF_CYCLES:-100}"
@@ -471,11 +472,14 @@ for suite_name in "${REQUESTED_SUITES[@]}"; do
         pruned_validation_orin|pruned_orin)
             SELECTED_SUITES[pruned_validation_orin]=1
             ;;
+        pruned_validation_orin_bs32|pruned_orin_bs32)
+            SELECTED_SUITES[pruned_validation_orin_bs32]=1
+            ;;
         pruned_validation_pi5|pruned_pi5)
             SELECTED_SUITES[pruned_validation_pi5]=1
             ;;
         *)
-            die "--suite must be a comma-separated list of linear, conv, attention, rotaryattention, lenet, resnet18, resnet50, pruned_validation_orin, pruned_validation_pi5, or all"
+            die "--suite must be a comma-separated list of linear, conv, attention, rotaryattention, lenet, resnet18, resnet50, pruned_validation_orin, pruned_validation_orin_bs32, pruned_validation_pi5, or all"
             ;;
     esac
 done
@@ -696,7 +700,7 @@ fi
 if suite_is_selected resnet50; then
     resnet50_total=$((1 + ${#RESNET50_COMPONENT_MODELS[@]}))
 fi
-if suite_is_selected pruned_validation_orin; then
+if suite_is_selected pruned_validation_orin || suite_is_selected pruned_validation_orin_bs32; then
     pruned_validation_orin_total=2
 fi
 if suite_is_selected pruned_validation_pi5; then
@@ -958,6 +962,11 @@ fi
 if suite_is_selected pruned_validation_orin; then
     run_experiment "$CIFAR_DENSE_MODEL_PATH" "$NETWORK_BATCH_SIZE"
     run_experiment "$CIFAR_PRUNED_ORIN_MODEL_PATH" "$NETWORK_BATCH_SIZE"
+fi
+
+if suite_is_selected pruned_validation_orin_bs32; then
+    run_experiment "$CIFAR_DENSE_MODEL_PATH" "${NETWORK_BATCH_SIZE:-32}"
+    run_experiment "$CIFAR_PRUNED_ORIN_BS32_MODEL_PATH" "${NETWORK_BATCH_SIZE:-32}"
 fi
 
 if suite_is_selected pruned_validation_pi5; then

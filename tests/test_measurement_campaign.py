@@ -140,6 +140,43 @@ def test_pruned_validation_orin_suite_schedules_dense_and_orin_pruned_models(tmp
     assert model_paths[1].endswith("PrunedOrinResNet18_32_10.pt")
 
 
+def test_pruned_validation_orin_bs32_suite_schedules_dense_and_orin_bs32_pruned_models(tmp_path):
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "CONNECTION_CONFIG": str(PROJECT_ROOT / "measurement_hosts.example.json"),
+            "OUTPUT_ROOT": str(tmp_path),
+            "BACKEND": "cuda",
+            "MODEL_ROOT": "Models/CUDA",
+        }
+    )
+    result = subprocess.run(
+        [
+            "bash",
+            str(PROJECT_ROOT / "run_measurement_campaign.sh"),
+            "--board",
+            "agx_orin_bs32",
+            "--suite",
+            "pruned_validation_orin_bs32",
+            "--dry-run",
+        ],
+        cwd=PROJECT_ROOT,
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    model_paths = [
+        match.group(1)
+        for line in result.stdout.splitlines()
+        if (match := re.match(r"^\[\d+/\d+\] (\S+)$", line))
+    ]
+    assert "2 PrunedOrin, 0 PrunedPi5, 2 total" in result.stdout
+    assert len(model_paths) == 2
+    assert model_paths[0].endswith("ResNet18_32_10.pt")
+    assert model_paths[1].endswith("PrunedOrinBs32ResNet18_32_10.pt")
+
+
 def test_pruned_validation_pi5_suite_schedules_dense_and_pi5_pruned_models(tmp_path):
     environment = os.environ.copy()
     environment.update(
