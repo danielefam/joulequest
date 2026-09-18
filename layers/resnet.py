@@ -299,7 +299,28 @@ class PrunedPi5CifarResNet18(PrunedCifarResNet18):
 
 
 # Default configuration for AGX Orin at Batch Size 32
-DEFAULT_PRUNED_CONFIG_ORIN_BS32 = DEFAULT_PRUNED_CONFIG_ORIN.copy()
+DEFAULT_PRUNED_CONFIG_ORIN_BS32 = {
+    "stem_out": 64,
+    "blocks": [
+        # stage 1 (layer1.0)
+        {"in_channels": 64, "mid_channels": 64, "out_channels": 64, "stride": 1},
+        # stage 1 (layer1.1)
+        {"in_channels": 64, "mid_channels": 58, "out_channels": 64, "stride": 1},
+        # stage 2 (layer2.0)
+        {"in_channels": 64, "mid_channels": 128, "out_channels": 127, "stride": 2},
+        # stage 2 (layer2.1)
+        {"in_channels": 127, "mid_channels": 128, "out_channels": 127, "stride": 1},
+        # stage 3 (layer3.0)
+        {"in_channels": 127, "mid_channels": 253, "out_channels": 249, "stride": 2},
+        # stage 3 (layer3.1)
+        {"in_channels": 249, "mid_channels": 192, "out_channels": 236, "stride": 1},
+        # stage 4 (layer4.0)
+        {"in_channels": 236, "mid_channels": 381, "out_channels": 222, "stride": 2},
+        # stage 4 (layer4.1)
+        {"in_channels": 222, "mid_channels": 16, "out_channels": 297, "stride": 1},
+    ],
+    "classifier_in": 297,
+}
 
 
 class PrunedOrinBs32CifarResNet18(PrunedCifarResNet18):
