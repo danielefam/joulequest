@@ -7,6 +7,12 @@ import json
 import sys
 from pathlib import Path
 
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+if str(REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPOSITORY_ROOT))
+
+from layers.pruned_resnet import PrunedResNet18Spec
+
 DEFAULT_DATA_PATHS = {
     "agx_orin": {
         "pruning_log": "jouleNAS/experiments/pruning_logs/resnet18_icpr_weight_0p005_lookup_agx_orin_seed_0_energy_mode_discrete_978062_pruning.json",
@@ -179,6 +185,130 @@ def compare_predictions_and_measurements(predictions, measurements):
     }
 
 
+def compose_estimator_scope_energy(
+    summary_csv_path,
+    pruning_log_path,
+    batch_size=1,
+):
+    """Compare exact Conv/Linear standalone energy with the pruned whole model."""
+    spec = PrunedResNet18Spec.from_pruning_log(pruning_log_path)
+    expected = {operation.model_name: operation for operation in spec.estimator_operations()}
+    selected = {}
+    whole_model = None
+
+    with Path(summary_csv_path).open(newline="", encoding="utf-8") as summary_file:
+        for row in csv.DictReader(summary_file):
+            if row.get("status") != "COMPLETE":
+                continue
+            if row.get("architecture_id") != spec.architecture_id:
+                continue
+            if f"_bs{batch_size}_" not in row.get("campaign_id", ""):
+                continue
+            model_name = Path(row.get("model_path", "")).name
+            if model_name == "PrunedResNet18_32_10.pt":
+                if whole_model is None or row["campaign_id"] > whole_model["campaign_id"]:
+                    whole_model = row
+            if model_name in expected:
+                previous = selected.get(model_name)
+                if previous is None or row["campaign_id"] > previous["campaign_id"]:
+                    selected[model_name] = row
+
+    components = []
+    missing = []
+    review = []
+    composed_energy = 0.0
+    for model_name, operation in expected.items():
+        row = selected.get(model_name)
+        if row is None:
+            missing.append(model_name)
+            continue
+        energy = float(row["energy_mean_mJ"])
+        weighted_energy = operation.count * energy
+        composed_energy += weighted_energy
+        quality = row.get("quality_status", "UNKNOWN").upper()
+        if quality != "OK":
+            review.append(model_name)
+        components.append(
+            {
+                "model_name": model_name,
+                "count": operation.count,
+                "energy_mean_mJ": energy,
+                "weighted_energy_mJ": weighted_energy,
+                "quality_status": quality,
+                "campaign_id": row["campaign_id"],
+            }
+        )
+
+    measured_energy = (
+        float(whole_model["energy_mean_mJ"]) if whole_model is not None else None
+    )
+    complete = whole_model is not None and not missing
+    residual = measured_energy - composed_energy if complete else None
+    residual_fraction = (
+        residual / measured_energy
+        if residual is not None and measured_energy
+        else None
+    )
+    return {
+        "architecture_id": spec.architecture_id,
+        "batch_size": batch_size,
+        "scope": "conv2d_linear",
+        "expected_unique_components": len(expected),
+        "expected_operation_calls": sum(item.count for item in expected.values()),
+        "components": components,
+        "missing_components": missing,
+        "review_components": review,
+        "composed_energy_mJ": composed_energy if not missing else None,
+        "measured_whole_model_energy_mJ": measured_energy,
+        "residual_energy_mJ": residual,
+        "residual_fraction": residual_fraction,
+        "complete": complete,
+        "whole_model_campaign_id": (
+            whole_model["campaign_id"] if whole_model is not None else None
+        ),
+    }
+
+
+def format_composition_report(composition):
+    lines = [
+        "",
+        "[Direct] Standalone Conv2d + Linear composition:",
+        f"  - Architecture ID      : {composition['architecture_id']}",
+        f"  - Batch size           : {composition['batch_size']}",
+        "  - Estimator scope      : Conv2d and Linear only",
+        f"  - Required coordinates : {composition['expected_unique_components']}",
+        f"  - Operation calls      : {composition['expected_operation_calls']}",
+    ]
+    if not composition["complete"]:
+        lines.append("  - Status               : INCOMPLETE")
+        if composition["measured_whole_model_energy_mJ"] is None:
+            lines.append("  - Missing whole model  : PrunedResNet18_32_10.pt")
+        if composition["missing_components"]:
+            lines.append(
+                "  - Missing components   : "
+                + ", ".join(composition["missing_components"])
+            )
+        return "\n".join(lines)
+
+    lines.extend(
+        [
+            f"  - Standalone sum       : {composition['composed_energy_mJ']:.6f} mJ/sample",
+            f"  - Whole model          : {composition['measured_whole_model_energy_mJ']:.6f} mJ/sample",
+            f"  - Residual overhead    : {composition['residual_energy_mJ']:+.6f} mJ/sample",
+            f"  - Residual fraction    : {composition['residual_fraction']:+.2%}",
+        ]
+    )
+    if composition["review_components"]:
+        lines.append(
+            "  - REVIEW components    : "
+            + ", ".join(composition["review_components"])
+        )
+    lines.append(
+        "  The residual includes unmodelled operations, fusion, launch, and runtime overhead; it is not automatically measurement error."
+    )
+    return "\n".join(lines)
+
+
 def format_report(board, predictions, measurements, comparison):
     """Render a clean summary report."""
     lines = []
@@ -259,6 +389,11 @@ def main():
         default=None,
         help="Batch size to extract from summary CSV (default: from board config)",
     )
+    parser.add_argument(
+        "--composition-only",
+        action="store_true",
+        help="Compare standalone Conv/Linear measurements without JouleNAS metrics CSV",
+    )
 
     args = parser.parse_args()
 
@@ -269,6 +404,31 @@ def main():
     target_batch_size = args.batch_size if args.batch_size is not None else board_defaults.get("batch_size", 1)
     metrics_csv = Path(args.metrics_csv or (repo_root / board_defaults["metrics_csv"]))
     summary_csv = Path(args.summary_csv or (repo_root / board_defaults["summary_csv"]))
+
+    composition = None
+    pruning_log = Path(
+        args.pruning_log or (repo_root / board_defaults["pruning_log"])
+    )
+    if args.pruning_log:
+        try:
+            composition = compose_estimator_scope_energy(
+                summary_csv,
+                pruning_log,
+                batch_size=target_batch_size,
+            )
+        except Exception as error:
+            print(f"Error composing physical measurements: {error}", file=sys.stderr)
+            return 1
+
+    if args.composition_only:
+        if composition is None:
+            print("Error: --composition-only requires --pruning-log", file=sys.stderr)
+            return 1
+        if args.json:
+            print(json.dumps({"board": args.board, "composition": composition}, indent=2))
+        else:
+            print(format_composition_report(composition))
+        return 0
 
     try:
         predictions = load_joulenas_metrics(metrics_csv)
@@ -293,10 +453,13 @@ def main():
             "predictions": predictions,
             "measurements": measurements,
             "comparison": comparison,
+            "composition": composition,
         }
         print(json.dumps(output, indent=2))
     else:
         print(format_report(args.board, predictions, measurements, comparison))
+        if composition is not None:
+            print(format_composition_report(composition))
 
     return 0
 

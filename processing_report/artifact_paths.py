@@ -51,6 +51,7 @@ def load_measurement_metadata(manifest_dir, csv_path):
         return {
             "campaign_id": manifest["campaign_id"],
             "model_path": manifest["model_path"],
+            "architecture_id": manifest.get("architecture_id"),
             "status": manifest["status"],
             "quality_status": manifest.get("quality_status"),
             "inferences_per_cycle": plan["inferences_per_cycle"],

@@ -521,6 +521,12 @@ class SshExperimentController:
             )
         if getattr(args, "cpu_threads", None) is not None:
             arguments.extend(["--cpu-threads", str(args.cpu_threads)])
+        if getattr(args, "pruned_config_json", None) is not None:
+            arguments.extend(
+                ["--pruned-config-json", args.pruned_config_json]
+            )
+        if getattr(args, "architecture_id", None) is not None:
+            arguments.extend(["--architecture-id", args.architecture_id])
         return arguments
 
     def build_command(self, args):
@@ -981,6 +987,8 @@ def build_argument_parser():
     parser.add_argument("--backend", choices=["tpu", "cpu", "cuda"], required=True)
     parser.add_argument("--model", required=True)
     parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--pruned-config-json", default=None)
+    parser.add_argument("--architecture-id", default=None)
     parser.add_argument("--output-directory", type=Path, required=True)
     parser.add_argument("--port", default=None)
     parser.add_argument("--baud", type=int, default=115200)
@@ -1143,6 +1151,8 @@ def build_local_manager(args, acquisition_controller):
         safety_margin_seconds=args.safety_margin_seconds,
         acquisition_controller=acquisition_controller,
         manifest_directory=args.output_directory,
+        pruned_config_json=getattr(args, "pruned_config_json", None),
+        architecture_id=getattr(args, "architecture_id", None),
     )
 
 

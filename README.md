@@ -234,6 +234,21 @@ and skips models that already have a `COMPLETE` manifest. It never switches
 boards. After it finishes, change the physical board and start a new invocation
 with a new board label and local connection/current settings.
 
+For a pruning-log-defined ResNet-18 and its exact Conv/Linear composition, run:
+
+```bash
+BACKEND=cuda NETWORK_BATCH_SIZE=32 \
+./run_measurement_campaign.sh \
+  --board agx_orin_bs32 \
+  --suite pruned_resnet18 \
+  --pruning-log measurements/pruning_logs/PRUNING_LOG.json
+```
+
+The log drives model construction, standalone coordinates, and an
+architecture-aware resume identity. See
+[docs_new/pruned_resnet_measurement.md](docs_new/pruned_resnet_measurement.md)
+for result interpretation, shortcut semantics, and the code index.
+
 Inspect all generated commands without starting SSH, inference, or acquisition:
 
 ```bash

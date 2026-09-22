@@ -16,5 +16,6 @@ docs_new/*
 !docs_new/joulegrad_energy_estimation.md
 !docs_new/energy_lookup_table_measurement_audit.md
 !docs_new/terminal_acquisition_full_report.md
+!docs_new/pruned_resnet_measurement.md
 measurement_hosts.local.json
 *.ipynb

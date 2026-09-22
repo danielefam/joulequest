@@ -174,6 +174,7 @@ def process_file(csv_path, metadata, args, write_plot=True):
     return {
         "campaign_id": metadata["campaign_id"],
         "model_path": metadata["model_path"],
+        "architecture_id": metadata.get("architecture_id"),
         "status": metadata["status"],
         "quality_status": metadata["quality_status"],
         "file": str(csv_path.relative_to(args.data_dir)),

@@ -1,6 +1,8 @@
 from torch import nn
 import torch
 
+from layers.pruned_resnet import PrunedResNet18Spec
+
 
 class ResNetBasicBlock(nn.Module):
     expansion = 1
@@ -81,6 +83,69 @@ class ResNetResidualAdd(nn.Module):
 
     def forward(self, inputs):
         return inputs + inputs
+
+
+class PrunedResNetBasicBlock(nn.Module):
+    """Basic block whose learned shortcut is explicit in the pruning spec."""
+
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        stride=1,
+        mid_channels=None,
+        shortcut=None,
+    ):
+        super().__init__()
+        mid_channels = mid_channels if mid_channels is not None else out_channels
+        self.convolution1 = nn.Conv2d(
+            in_channels, mid_channels, kernel_size=3, stride=stride, padding=1, bias=False
+        )
+        self.normalization1 = nn.BatchNorm2d(mid_channels)
+        self.activation = nn.ReLU(inplace=True)
+        self.convolution2 = nn.Conv2d(
+            mid_channels, out_channels, kernel_size=3, padding=1, bias=False
+        )
+        self.normalization2 = nn.BatchNorm2d(out_channels)
+        self.shortcut = None
+        if shortcut is not None:
+            self.shortcut = nn.Sequential(
+                nn.Conv2d(
+                    shortcut["in_channels"],
+                    shortcut["out_channels"],
+                    kernel_size=1,
+                    stride=stride,
+                    bias=False,
+                ),
+                nn.BatchNorm2d(shortcut["out_channels"]),
+            )
+        self.stride = stride
+        self.out_channels = out_channels
+
+    def _identity_shortcut(self, inputs):
+        residual = inputs[:, :, :: self.stride, :: self.stride]
+        channel_delta = self.out_channels - residual.shape[1]
+        if channel_delta < 0:
+            return residual[:, : self.out_channels]
+        if channel_delta > 0:
+            padding = residual.new_zeros(
+                residual.shape[0],
+                channel_delta,
+                residual.shape[2],
+                residual.shape[3],
+            )
+            return torch.cat((residual, padding), dim=1)
+        return residual
+
+    def forward(self, inputs):
+        residual = (
+            self.shortcut(inputs)
+            if self.shortcut is not None
+            else self._identity_shortcut(inputs)
+        )
+        outputs = self.activation(self.normalization1(self.convolution1(inputs)))
+        outputs = self.normalization2(self.convolution2(outputs))
+        return self.activation(outputs + residual)
 
 
 class ResNet18(nn.Module):
@@ -182,21 +247,38 @@ class PrunedCifarResNet18(nn.Module):
             nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
         )
         blocks = cfg["blocks"]
+        block_type = (
+            PrunedResNetBasicBlock
+            if cfg.get("shortcut_policy") == "explicit"
+            else ResNetBasicBlock
+        )
+
+        def build_block(block):
+            arguments = {
+                "in_channels": block["in_channels"],
+                "mid_channels": block["mid_channels"],
+                "out_channels": block["out_channels"],
+                "stride": block["stride"],
+            }
+            if block_type is PrunedResNetBasicBlock:
+                arguments["shortcut"] = block.get("shortcut")
+            return block_type(**arguments)
+
         self.layer1 = nn.Sequential(
-            ResNetBasicBlock(**blocks[0]),
-            ResNetBasicBlock(**blocks[1]),
+            build_block(blocks[0]),
+            build_block(blocks[1]),
         )
         self.layer2 = nn.Sequential(
-            ResNetBasicBlock(**blocks[2]),
-            ResNetBasicBlock(**blocks[3]),
+            build_block(blocks[2]),
+            build_block(blocks[3]),
         )
         self.layer3 = nn.Sequential(
-            ResNetBasicBlock(**blocks[4]),
-            ResNetBasicBlock(**blocks[5]),
+            build_block(blocks[4]),
+            build_block(blocks[5]),
         )
         self.layer4 = nn.Sequential(
-            ResNetBasicBlock(**blocks[6]),
-            ResNetBasicBlock(**blocks[7]),
+            build_block(blocks[6]),
+            build_block(blocks[7]),
         )
         self.pool = nn.AdaptiveAvgPool2d((1, 1))
         self.classifier = nn.Linear(cfg["classifier_in"], num_classes)
@@ -204,67 +286,17 @@ class PrunedCifarResNet18(nn.Module):
     @classmethod
     def from_pruning_log(cls, path, num_classes=10, cifar_stem=True):
         """Build a PrunedCifarResNet18 directly from a JouleNAS pruning log JSON."""
-        import json
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        stem_out = data["stem.conv"]["active_output"]
-        blocks = [
-            {
-                "in_channels": data["layer1.0.conv1"]["active_input"],
-                "mid_channels": data["layer1.0.conv1"]["active_output"],
-                "out_channels": data["layer1.0.conv2"]["active_output"],
-                "stride": 1,
-            },
-            {
-                "in_channels": data["layer1.1.conv1"]["active_input"],
-                "mid_channels": data["layer1.1.conv1"]["active_output"],
-                "out_channels": data["layer1.1.conv2"]["active_output"],
-                "stride": 1,
-            },
-            {
-                "in_channels": data["layer2.0.conv1"]["active_input"],
-                "mid_channels": data["layer2.0.conv1"]["active_output"],
-                "out_channels": data["layer2.0.conv2"]["active_output"],
-                "stride": 2,
-            },
-            {
-                "in_channels": data["layer2.1.conv1"]["active_input"],
-                "mid_channels": data["layer2.1.conv1"]["active_output"],
-                "out_channels": data["layer2.1.conv2"]["active_output"],
-                "stride": 1,
-            },
-            {
-                "in_channels": data["layer3.0.conv1"]["active_input"],
-                "mid_channels": data["layer3.0.conv1"]["active_output"],
-                "out_channels": data["layer3.0.conv2"]["active_output"],
-                "stride": 2,
-            },
-            {
-                "in_channels": data["layer3.1.conv1"]["active_input"],
-                "mid_channels": data["layer3.1.conv1"]["active_output"],
-                "out_channels": data["layer3.1.conv2"]["active_output"],
-                "stride": 1,
-            },
-            {
-                "in_channels": data["layer4.0.conv1"]["active_input"],
-                "mid_channels": data["layer4.0.conv1"]["active_output"],
-                "out_channels": data["layer4.0.conv2"]["active_output"],
-                "stride": 2,
-            },
-            {
-                "in_channels": data["layer4.1.conv1"]["active_input"],
-                "mid_channels": data["layer4.1.conv1"]["active_output"],
-                "out_channels": data["layer4.1.conv2"]["active_output"],
-                "stride": 1,
-            },
-        ]
-        classifier_in = data["classifier"]["active_input"]
-        config = {
-            "stem_out": stem_out,
-            "blocks": blocks,
-            "classifier_in": classifier_in,
-        }
-        return cls(num_classes=num_classes, cifar_stem=cifar_stem, config=config)
+        spec = PrunedResNet18Spec.from_pruning_log(path)
+        if num_classes != spec.classifier_out:
+            raise ValueError(
+                f"num_classes={num_classes} does not match pruning log "
+                f"classifier output ({spec.classifier_out})"
+            )
+        return cls(
+            num_classes=num_classes,
+            cifar_stem=cifar_stem,
+            config=spec.to_model_config(),
+        )
 
     def forward(self, inputs):
         outputs = self.stem(inputs)

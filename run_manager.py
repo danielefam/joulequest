@@ -384,6 +384,8 @@ class RunManager:
         acquisition_controller=None,
         manifest_directory=None,
         cpu_threads=None,
+        pruned_config_json=None,
+        architecture_id=None,
         sleep_fn=time.sleep,
         input_fn=input,
         monotonic_fn=time.monotonic,
@@ -391,6 +393,8 @@ class RunManager:
         self.runner_cls = runner_cls
         self.model_path = model_path
         self.cpu_threads = cpu_threads
+        self.pruned_config_json = pruned_config_json
+        self.architecture_id = architecture_id
         self.number_of_cycles = number_of_cycles
         self.sleep_time = sleep_time
         self.backend = backend
@@ -496,9 +500,12 @@ class RunManager:
     def _new_campaign_id(self):
         model_stem = Path(self.model_path).stem.replace(" ", "-")
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        architecture_suffix = (
+            f"_arch{self.architecture_id}" if self.architecture_id else ""
+        )
         return (
             f"{timestamp}_{model_stem}_bs{self.batch_size}_"
-            f"{uuid.uuid4().hex[:8]}"
+            f"{uuid.uuid4().hex[:8]}{architecture_suffix}"
         )
 
     def _run_warmup(self, runner):
@@ -1253,6 +1260,10 @@ class RunManager:
                 "available_cpu_cores": os.cpu_count(),
             },
         }
+        if self.architecture_id is not None:
+            manifest["architecture_id"] = self.architecture_id
+        if self.pruned_config_json is not None:
+            manifest["pruned_config"] = json.loads(self.pruned_config_json)
         self.last_manifest = manifest
         runner = None
         acquisition_stopped = False
@@ -1265,10 +1276,13 @@ class RunManager:
                 except (ImportError, AttributeError):
                     pass
 
+            runner_arguments = {"batch_size": self.batch_size}
+            if self.pruned_config_json is not None:
+                runner_arguments["pruned_config_json"] = self.pruned_config_json
             runner = self.runner_cls(
                 self.model_path,
                 self.backend,
-                batch_size=self.batch_size,
+                **runner_arguments,
             )
             runner.prepare()
             if self.backend == "cpu":
@@ -1361,6 +1375,8 @@ def build_argument_parser():
     parser.add_argument("--backend", choices=["tpu", "cpu", "cuda"], required=True)
     parser.add_argument("--model", required=True)
     parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--pruned-config-json", default=None)
+    parser.add_argument("--architecture-id", default=None)
     parser.add_argument("--number_of_cycles", type=int, default=5)
     parser.add_argument("--sleep_time", type=float, default=10.0)
     parser.add_argument("--inferences_per_cycle", type=int, default=None)
@@ -1447,6 +1463,8 @@ def main():
         acquisition_controller=acquisition_controller,
         manifest_directory=args.manifest_directory,
         cpu_threads=getattr(args, "cpu_threads", None),
+        pruned_config_json=getattr(args, "pruned_config_json", None),
+        architecture_id=getattr(args, "architecture_id", None),
     )
     try:
         manifest = manager.execute()

@@ -247,9 +247,10 @@ Options:
   --board LABEL       Safe label used only for the local result directory.
     --suite SUITES      Comma-separated suite list: linear, conv, attention,
                         rotaryattention, lenet, resnet18, resnet50,
-                        pruned_validation_orin, pruned_validation_pi5, or all
+                                                pruned_resnet18, legacy pruned_validation aliases, or all
                         (default: all). all runs Linear, Conv, SelfAttention,
                         RotaryAttention, and LeNet.
+    --pruning-log PATH   JouleNAS pruning JSON required by pruned_resnet18.
   --dry-run           Print commands without running measurements.
   --continue-on-error Continue after an experiment exits nonzero.
   --repeat-completed  Rerun experiments with an existing COMPLETE manifest.
@@ -324,10 +325,10 @@ load_completed_manifests() {
     COMPLETED_MANIFESTS=()
     MANIFEST_CACHE_LOADED=1
     [[ -d "$OUTPUT_DIRECTORY" ]] || return 0
-    local completed_model completed_batch
-    while IFS=$'\t' read -r completed_model completed_batch; do
+    local completed_model completed_batch completed_architecture
+    while IFS=$'\t' read -r completed_model completed_batch completed_architecture; do
         [[ -n "$completed_model" ]] || continue
-        COMPLETED_MANIFESTS["${completed_model}|${completed_batch}"]=1
+        COMPLETED_MANIFESTS["${completed_model}|${completed_batch}|${completed_architecture}"]=1
     done < <(
         "$PYTHON_BIN" - "$OUTPUT_DIRECTORY" <<'PY'
 import json
@@ -350,20 +351,21 @@ for manifest_path in output_directory.glob("*.json"):
     if not raw_path:
         continue
     batch_size = int(manifest.get("input_batch_size", 1))
-    print(f"{raw_path}\t{batch_size}")
+    architecture_id = manifest.get("architecture_id", "")
+    print(f"{raw_path}\t{batch_size}\t{architecture_id}")
     model_name = Path(raw_path).name
     legacy_conv_match = re.fullmatch(
         r"(Conv_\d+_\d+_\d+_\d+)_1(\.[^.]+)", model_name
     )
     if legacy_conv_match:
         norm_name = f"{legacy_conv_match.group(1)}{legacy_conv_match.group(2)}"
-        print(f"{Path(raw_path).with_name(norm_name)}\t{batch_size}")
+        print(f"{Path(raw_path).with_name(norm_name)}\t{batch_size}\t{architecture_id}")
     legacy_conv_without = re.fullmatch(
         r"(Conv_\d+_\d+_\d+_\d+)(\.[^.]+)", model_name
     )
     if legacy_conv_without:
         alt_name = f"{legacy_conv_without.group(1)}_1{legacy_conv_without.group(2)}"
-        print(f"{Path(raw_path).with_name(alt_name)}\t{batch_size}")
+        print(f"{Path(raw_path).with_name(alt_name)}\t{batch_size}\t{architecture_id}")
 PY
     )
 }
@@ -371,10 +373,15 @@ PY
 manifest_exists_for_model() {
     local model_path="$1"
     local batch_size="$2"
+    local architecture_id="${3:-}"
     if ((MANIFEST_CACHE_LOADED == 0)); then
         load_completed_manifests
     fi
-    [[ -n "${COMPLETED_MANIFESTS["${model_path}|${batch_size}"]+exists}" ]]
+    if [[ -n "${COMPLETED_MANIFESTS["${model_path}|${batch_size}|${architecture_id}"]+exists}" ]]; then
+        return 0
+    fi
+    [[ -z "$architecture_id" ]] &&
+        [[ -n "${COMPLETED_MANIFESTS["${model_path}|${batch_size}"]+exists}" ]]
 }
 
 CURRENT_MODEL_GFLOPS=0
@@ -406,6 +413,7 @@ is_conv_model_too_heavy() {
 
 BOARD_LABEL=""
 SUITE="all"
+PRUNING_LOG="${PRUNING_LOG:-}"
 DRY_RUN=0
 
 while (($#)); do
@@ -418,6 +426,11 @@ while (($#)); do
         --suite)
             (($# >= 2)) || die "--suite requires a value"
             SUITE="$2"
+            shift 2
+            ;;
+        --pruning-log)
+            (($# >= 2)) || die "--pruning-log requires a value"
+            PRUNING_LOG="$2"
             shift 2
             ;;
         --dry-run)
@@ -466,7 +479,7 @@ for suite_name in "${REQUESTED_SUITES[@]}"; do
             SELECTED_SUITES[rotaryattention]=1
             SELECTED_SUITES[lenet]=1
             ;;
-        linear|conv|attention|rotaryattention|lenet|resnet18|resnet50)
+        linear|conv|attention|rotaryattention|lenet|resnet18|resnet50|pruned_resnet18)
             SELECTED_SUITES["$suite_name"]=1
             ;;
         pruned_validation_orin|pruned_orin)
@@ -479,7 +492,7 @@ for suite_name in "${REQUESTED_SUITES[@]}"; do
             SELECTED_SUITES[pruned_validation_pi5]=1
             ;;
         *)
-            die "--suite must be a comma-separated list of linear, conv, attention, rotaryattention, lenet, resnet18, resnet50, pruned_validation_orin, pruned_validation_orin_bs32, pruned_validation_pi5, or all"
+            die "--suite must be a comma-separated list of linear, conv, attention, rotaryattention, lenet, resnet18, resnet50, pruned_resnet18, legacy pruned_validation aliases, or all"
             ;;
     esac
 done
@@ -518,6 +531,31 @@ done
     die "VALIDATION_MAX_ROUNDS must be a positive integer"
 [[ "$MAX_CALIBRATION_INFERENCES" =~ ^[1-9][0-9]*$ ]] ||
     die "MAX_CALIBRATION_INFERENCES must be a positive integer"
+
+PRUNED_ARCHITECTURE_ID=""
+PRUNED_CONFIG_JSON=""
+PRUNED_COMPONENT_MODELS=()
+if suite_is_selected pruned_resnet18; then
+    [[ -n "$PRUNING_LOG" ]] || die "--pruning-log is required by pruned_resnet18"
+    [[ -f "$PRUNING_LOG" ]] || die "pruning log not found: $PRUNING_LOG"
+    while IFS=$'\t' read -r record_type first second; do
+        case "$record_type" in
+            META)
+                PRUNED_ARCHITECTURE_ID="$first"
+                PRUNED_CONFIG_JSON="$second"
+                ;;
+            MODEL)
+                PRUNED_COMPONENT_MODELS+=("$first")
+                ;;
+        esac
+    done < <(
+        "$PYTHON_BIN" "$SCRIPT_DIR/plan_pruned_measurement.py" \
+            --pruning-log "$PRUNING_LOG" \
+            --image-size 32
+    )
+    [[ -n "$PRUNED_ARCHITECTURE_ID" && -n "$PRUNED_CONFIG_JSON" ]] ||
+        die "could not build a pruned measurement plan"
+fi
 is_nonnegative_number "$SLEEP_TIME" || die "SLEEP_TIME must be nonnegative"
 is_nonnegative_number "$TARGET_BURST_SECONDS" ||
     die "TARGET_BURST_SECONDS must be nonnegative"
@@ -675,6 +713,7 @@ resnet18_total=0
 resnet50_total=0
 pruned_validation_orin_total=0
 pruned_validation_pi5_total=0
+pruned_resnet18_total=0
 if suite_is_selected linear; then
     linear_axis_total=$((${#LINEAR_SIZE_LIST[@]} + ${#LINEAR_PRUNING_EXTRA_SIZE_LIST[@]}))
     linear_total=$((linear_axis_total * linear_axis_total))
@@ -706,7 +745,10 @@ fi
 if suite_is_selected pruned_validation_pi5; then
     pruned_validation_pi5_total=2
 fi
-total=$((linear_total + conv_total + attention_total + rotaryattention_total + lenet_total + resnet18_total + resnet50_total + pruned_validation_orin_total + pruned_validation_pi5_total))
+if suite_is_selected pruned_resnet18; then
+    pruned_resnet18_total=$((2 + ${#PRUNED_COMPONENT_MODELS[@]}))
+fi
+total=$((linear_total + conv_total + attention_total + rotaryattention_total + lenet_total + resnet18_total + resnet50_total + pruned_validation_orin_total + pruned_validation_pi5_total + pruned_resnet18_total))
 
 printf 'Board label: %s\n' "$BOARD_LABEL"
 printf 'Suite: %s (%d Linear, %d Conv, %d SelfAttention, %d RotaryAttention, %d LeNet, %d ResNet-18, %d ResNet-50, %d PrunedOrin, %d PrunedPi5, %d total)\n' \
@@ -743,6 +785,8 @@ trap handle_interrupt INT
 run_experiment() {
     local model_path="$1"
     local batch_size="$2"
+    local architecture_id="${3:-}"
+    local pruned_config_json="${4:-}"
     local model_name="${model_path##*/}"
     local model_stem="${model_name%.*}"
     local log_path="${LOG_DIRECTORY}/${model_stem}.log"
@@ -750,6 +794,12 @@ run_experiment() {
     local exit_code
     local -a pipeline_status
     local -a command=("${COMMON_ARGS[@]}" --batch-size "$batch_size" --model "$model_path")
+    if [[ -n "$architecture_id" ]]; then
+        command+=(--architecture-id "$architecture_id")
+    fi
+    if [[ -n "$pruned_config_json" ]]; then
+        command+=(--pruned-config-json "$pruned_config_json")
+    fi
 
     attempted=$((attempted + 1))
     printf '[%d/%d] %s\n' "$attempted" "$total" "$model_path"
@@ -765,7 +815,7 @@ run_experiment() {
         return 0
     fi
 
-    if ((REPEAT_COMPLETED == 0)) && manifest_exists_for_model "$model_path" "$batch_size"; then
+    if ((REPEAT_COMPLETED == 0)) && manifest_exists_for_model "$model_path" "$batch_size" "$architecture_id"; then
         skipped=$((skipped + 1))
         printf '  skipped: COMPLETE manifest already exists\n'
         return 0
@@ -819,7 +869,7 @@ run_experiment() {
     if ((exit_code == 0)); then
         completed=$((completed + 1))
         consecutive_failures=0
-        COMPLETED_MANIFESTS["${model_path}|${batch_size}"]=1
+        COMPLETED_MANIFESTS["${model_path}|${batch_size}|${architecture_id}"]=1
         printf '%s\t%s\tCOMPLETE\t0\t%s\n' \
             "$timestamp" "$model_path" "$log_path" >>"$SUMMARY_PATH"
         return 0
@@ -972,6 +1022,29 @@ fi
 if suite_is_selected pruned_validation_pi5; then
     run_experiment "$CIFAR_DENSE_MODEL_PATH" "$NETWORK_BATCH_SIZE"
     run_experiment "$CIFAR_PRUNED_PI5_MODEL_PATH" "$NETWORK_BATCH_SIZE"
+fi
+
+if suite_is_selected pruned_resnet18; then
+    run_experiment \
+        "$CIFAR_DENSE_MODEL_PATH" \
+        "$NETWORK_BATCH_SIZE" \
+        "$PRUNED_ARCHITECTURE_ID"
+    run_experiment \
+        "${RESNET18_MODEL_DIRECTORY}/PrunedResNet18_32_10${MODEL_SUFFIX}" \
+        "$NETWORK_BATCH_SIZE" \
+        "$PRUNED_ARCHITECTURE_ID" \
+        "$PRUNED_CONFIG_JSON"
+    for model_name in "${PRUNED_COMPONENT_MODELS[@]}"; do
+        if [[ "$model_name" == Linear_* ]]; then
+            model_path="${LINEAR_MODEL_DIRECTORY}/${model_name}"
+        else
+            model_path="${RESNET18_MODEL_DIRECTORY}/${model_name}"
+        fi
+        run_experiment \
+            "$model_path" \
+            "$NETWORK_BATCH_SIZE" \
+            "$PRUNED_ARCHITECTURE_ID"
+    done
 fi
 
 printf '\nCampaign finished for board %s.\n' "$BOARD_LABEL"

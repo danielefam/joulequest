@@ -1,5 +1,6 @@
 # runner.py
 import platform
+import json
 import numpy as np
 
 from base_runner import InferenceRunner
@@ -98,6 +99,7 @@ if _torch_available:
         ResNet50,
         ResNetResidualAdd,
     )
+    from layers.pruned_resnet import PrunedResNet18Spec
 
     @dataclass(frozen=True)
     class TorchLayerDefinition:
@@ -634,6 +636,7 @@ if _torch_available:
             device="cpu",
             from_state_dict=False,
             batch_size=1,
+            pruned_config_json=None,
         ):
             super().__init__(model_path, device=device)
             if isinstance(batch_size, bool) or not isinstance(batch_size, int):
@@ -643,6 +646,7 @@ if _torch_available:
             self.device = torch.device(device)
             self.from_state_dict = from_state_dict
             self.batch_size = batch_size
+            self.pruned_config_json = pruned_config_json
             self._load_model()
 
         def _load_model(self):
@@ -708,6 +712,31 @@ if _torch_available:
 
         def _build_model(self):
             """Build the layer represented by the validated model name."""
+            if self.pruned_config_json is not None:
+                if self.params["type"] not in {
+                    "prunedresnet18",
+                    "prunedorinresnet18",
+                    "prunedorinbs32resnet18",
+                    "prunedpi5resnet18",
+                }:
+                    raise ValueError(
+                        "A runtime pruned config requires a pruned ResNet-18 model"
+                    )
+                config = json.loads(self.pruned_config_json)
+                spec = PrunedResNet18Spec.from_config_dict(
+                    config,
+                    classifier_out=config["classifier_out"],
+                )
+                if spec.classifier_out != self.params["num_classes"]:
+                    raise ValueError(
+                        "Runtime pruned config classifier output does not match "
+                        "the model filename"
+                    )
+                return PrunedResNet18(
+                    num_classes=self.params["num_classes"],
+                    cifar_stem=(self.params["image_size"] <= 32),
+                    config=spec.to_model_config(),
+                ).to(self.device)
             definition = TORCH_LAYER_DEFINITIONS[self.params["type"]]
             return definition.build(self.params).to(self.device)
 

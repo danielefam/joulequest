@@ -3,6 +3,10 @@
 **Document date:** 2026-08-22
 **Launcher:** `run_measurement_campaign.sh`
 
+The pruning-log-driven ResNet-18 suite and direct composition report are
+documented in [pruned_resnet_measurement.md](pruned_resnet_measurement.md),
+including an index from workflow stages to code and tests.
+
 ## 1. Separation of responsibilities
 
 The measurement tools retain two distinct responsibilities:

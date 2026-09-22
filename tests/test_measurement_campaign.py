@@ -214,6 +214,57 @@ def test_pruned_validation_pi5_suite_schedules_dense_and_pi5_pruned_models(tmp_p
     assert model_paths[1] == "Models/CPU/ResNet18/PrunedPi5ResNet18_32_10.pt"
 
 
+def test_runtime_pruned_suite_uses_log_for_model_and_components(tmp_path):
+    pruning_log = PROJECT_ROOT / "measurements" / "pruning_logs" / (
+        "resnet18_icpr_weight_1p2_lookup_agxorinbs32_energy_lookup_"
+        "out_of_range_extrapolate_seed_0_energy_mode_discrete_998752_pruning.json"
+    )
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "CONNECTION_CONFIG": str(PROJECT_ROOT / "measurement_hosts.example.json"),
+            "OUTPUT_ROOT": str(tmp_path),
+            "BACKEND": "cuda",
+            "NETWORK_BATCH_SIZE": "32",
+        }
+    )
+    result = subprocess.run(
+        [
+            "bash",
+            str(PROJECT_ROOT / "run_measurement_campaign.sh"),
+            "--board",
+            "agx_orin_bs32",
+            "--suite",
+            "pruned_resnet18",
+            "--pruning-log",
+            str(pruning_log),
+            "--dry-run",
+        ],
+        cwd=PROJECT_ROOT,
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    model_paths = [
+        match.group(1)
+        for line in result.stdout.splitlines()
+        if (match := re.match(r"^\[\d+/\d+\] (\S+)$", line))
+    ]
+    assert "23 total" in result.stdout
+    assert len(model_paths) == 23
+    assert model_paths[:2] == [
+        "Models/CUDA/ResNet18/ResNet18_32_10.pt",
+        "Models/CUDA/ResNet18/PrunedResNet18_32_10.pt",
+    ]
+    assert any(path.endswith("ResNetConv_62_124_16_1_2_0.pt") for path in model_paths)
+    assert any(path.endswith("Linear_255_10.pt") for path in model_paths)
+    assert "--architecture-id 44450f2dfeb2c122" in result.stdout
+    assert "--batch-size 32" in result.stdout
+    assert "--pruned-config-json" in result.stdout
+
+
 def test_skips_already_completed_manifests(tmp_path):
     import json
 
