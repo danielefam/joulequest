@@ -189,6 +189,8 @@ class ScbSerial:
                 payload = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if not isinstance(payload, dict):
+                continue
 
             acknowledgement = payload.get("acknowledge")
             if (

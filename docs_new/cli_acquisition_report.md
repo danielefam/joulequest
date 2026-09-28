@@ -14,6 +14,8 @@ The TI GUI and Windows USB driver are not required on Ubuntu. The TI-SCB firmwar
 - `setdevice`, `rreg`, and `wreg` use newline-delimited commands and return JSON on the serial port.
 - `collect` is started and stopped on the serial port but sends measurements through the board's USB bulk interface.
 
+The serial logger accepts JSON response objects for command replies. It skips malformed lines and valid JSON values that are not objects while waiting for a reply; a missing valid reply still raises a protocol timeout with the received lines for diagnosis.
+
 TI does not currently publish a standalone INA226EVM command-line executable. The supported interface is the protocol described in section 4.2.4 of the INA226EVM User's Guide (SBOU276). A small host program must send those commands and write the replies to disk.
 
 For this repository, the recommended implementation is the included Ubuntu-compatible serial logger. It writes each sample to CSV immediately and retains no growing sample array, so a 50,000-point run does not have the GUI's memory/plotting failure mode. It can be launched over SSH and kept alive in `tmux`. Use USB bulk mode only when serial request/response polling is too slow.

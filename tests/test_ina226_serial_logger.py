@@ -79,6 +79,19 @@ class CalibrationTests(unittest.TestCase):
             parser.parse_args(["--output", "capture.csv", "--shunt-ohms", "0.012"])
 
 
+class SerialProtocolTests(unittest.TestCase):
+    def test_ignores_non_object_json_before_valid_response(self):
+        device = object.__new__(logger.ScbSerial)
+        device._timeout_seconds = 1.0
+        device._serial = Mock()
+        device._serial.readline.side_effect = [
+            b'[]\n',
+            b'{"acknowledge":"rreg 0","register":{"value":7},"evm_state":1}\n',
+        ]
+
+        self.assertEqual(device.command("rreg 0", expect_register=True), 7)
+
+
 class FakeScbSerial:
     instances = []
 
